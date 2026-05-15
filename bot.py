@@ -30,10 +30,26 @@ def salva_pasto(tipo, descrizione, kcal):
         "kcal": kcal
     }).execute()
 
-# --- COMANDI BOT ---
+# --- COMANDO /start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Ciao! Scrivimi cosa hai mangiato e lo registro nel diario 🍎")
 
+# --- COMANDO /test ---
+async def test_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        supabase.table("pasti").insert({
+            "data": "TEST",
+            "ora": "TEST",
+            "pasto": "test",
+            "descrizione": "test di connessione",
+            "kcal": 0
+        }).execute()
+
+        await update.message.reply_text("Test riuscito! Controlla Supabase 👍")
+    except Exception as e:
+        await update.message.reply_text(f"Errore: {e}")
+
+# --- REGISTRAZIONE PASTI ---
 async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
     testo = update.message.text.lower()
     kcal = stima_calorie(testo)
@@ -62,5 +78,6 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("test", test_sheet))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, log_food))
     app.run_polling()
