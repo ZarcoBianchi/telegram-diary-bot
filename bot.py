@@ -7,29 +7,36 @@ from supabase import create_client
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
-# --- TOKEN TELEGRAM ---
+# ---------------------------------------------------------
+# CONFIGURAZIONE
+# ---------------------------------------------------------
+
 TOKEN = os.getenv("BOT_TOKEN")
 
-# --- SUPABASE ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# --- GEMINI CONFIG ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 genai.configure(api_key=GEMINI_API_KEY)
+
 model = genai.GenerativeModel("gemini-2.0-flash")
 
+
 # ---------------------------------------------------------
-# 🔥 STIMA CALORIE CON GEMINI FLASH
+# STIMA CALORIE (versione naturale, senza regole brutte)
 # ---------------------------------------------------------
+
 def stima_calorie(cibo: str) -> int:
     prompt = f"""
-Sei un nutrizionista. Stima le calorie totali del seguente alimento o piatto:
+Sei un nutrizionista italiano. Stima le calorie totali del seguente alimento o piatto:
 
 \"{cibo}\"
 
-- Considera una porzione media realistica.
+Istruzioni:
+- Considera una porzione standard italiana.
+- Se è un piatto completo (pizza, pasta, panino), considera la porzione intera.
+- Se è un alimento singolo (mela, yogurt), usa valori realistici.
 - Se ci sono più ingredienti, somma le calorie.
 - Rispondi SOLO con un numero intero (le kcal stimate), senza testo aggiuntivo.
 """
@@ -38,19 +45,21 @@ Sei un nutrizionista. Stima le calorie totali del seguente alimento o piatto:
         response = model.generate_content(prompt)
         testo = response.text.strip()
 
+        # Estrai il primo numero
         match = re.search(r"\d+", testo)
         if match:
             return int(match.group(0))
 
-        return 300
+        return 300  # fallback
     except Exception as e:
         print("Errore Gemini:", e)
         return 300
 
 
 # ---------------------------------------------------------
-# 🧠 RICONOSCIMENTO DEL PASTO
+# RICONOSCIMENTO DEL PASTO
 # ---------------------------------------------------------
+
 def riconosci_pasto(testo: str) -> str:
     testo = testo.lower()
 
@@ -65,25 +74,34 @@ def riconosci_pasto(testo: str) -> str:
 
 
 # ---------------------------------------------------------
-# 🍽️ ESTRAZIONE DEL CIBO (versione semplice, senza distruggere le parole)
+# ESTRAZIONE DEL CIBO (versione corretta)
 # ---------------------------------------------------------
+
 def estrai_cibo(testo: str) -> str:
     testo = testo.lower()
 
-    parole_da_togliere = [
-        "ho mangiato", "oggi", "stamattina", "stasera",
-        "a pranzo", "a cena", "per", "ho preso"
+    # Rimuove solo frasi, NON articoli (per evitare "mela" → "me")
+    frasi_da_togliere = [
+        "ho mangiato",
+        "oggi",
+        "stamattina",
+        "stasera",
+        "a pranzo",
+        "a cena",
+        "per",
+        "ho preso"
     ]
 
-    for p in parole_da_togliere:
-        testo = testo.replace(p, "")
+    for f in frasi_da_togliere:
+        testo = testo.replace(f, "")
 
     return testo.strip()
 
 
 # ---------------------------------------------------------
-# 💾 SALVATAGGIO SU SUPABASE
+# SALVATAGGIO SU SUPABASE
 # ---------------------------------------------------------
+
 def salva_pasto(tipo: str, descrizione: str, kcal: int):
     now = datetime.now()
 
@@ -96,17 +114,15 @@ def salva_pasto(tipo: str, descrizione: str, kcal: int):
 
 
 # ---------------------------------------------------------
-# /start
+# COMANDI TELEGRAM
 # ---------------------------------------------------------
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Ciao! Scrivimi cosa hai mangiato e lo registro nel diario con una stima delle calorie 🍎"
     )
 
 
-# ---------------------------------------------------------
-# /test
-# ---------------------------------------------------------
 async def test_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         now = datetime.now()
@@ -123,9 +139,18 @@ async def test_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Errore: {e}")
 
 
+async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        risposta = model.generate_content("Dimmi un numero a caso tra 1 e 1000.")
+        await update.message.reply_text("Risposta Gemini: " + risposta.text)
+    except Exception as e:
+        await update.message.reply_text(f"Errore Gemini: {e}")
+
+
 # ---------------------------------------------------------
 # LOGICA PRINCIPALE
 # ---------------------------------------------------------
+
 async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
     testo = update.message.text
 
@@ -143,9 +168,13 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------
 # AVVIO BOT
 # ---------------------------------------------------------
+
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("test", test_sheet))
+    app.add_handler(CommandHandler("debug", debug))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, log_food))
+
     app.run_polling()
