@@ -22,11 +22,16 @@ client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 # ---------------------------------------------------------
 def stima_calorie(cibo):
     prompt = f"""
-    Stima le calorie totali del seguente alimento o piatto:
+    Sei un nutrizionista italiano. Stima le calorie totali del seguente piatto:
     '{cibo}'.
 
-    Considera una porzione media italiana.
-    Rispondi SOLO con un numero intero, senza testo aggiuntivo.
+    Regole:
+    - Considera una porzione media italiana.
+    - Usa valori realistici basati sulla cucina italiana.
+    - Se il piatto è composto da più ingredienti, somma le calorie.
+    - Una pizza margherita intera NON può avere meno di 600 kcal.
+    - Una porzione di pasta NON può avere meno di 300 kcal.
+    - Rispondi SOLO con un numero intero, senza testo aggiuntivo.
     """
 
     try:
@@ -42,10 +47,10 @@ def stima_calorie(cibo):
         if match:
             return int(match.group(0))
 
-        return 250  # fallback
+        return 400  # fallback
     except Exception as e:
         print("Errore Groq:", e)
-        return 250
+        return 400
 
 
 # ---------------------------------------------------------
