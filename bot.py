@@ -1,7 +1,8 @@
 import os
 import re
 from datetime import datetime
-from groq import Groq
+
+import google.generativeai as genai
 from supabase import create_client
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
@@ -14,52 +15,43 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# --- GROQ CLIENT ---
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+# --- GEMINI CONFIG ---
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel("gemini-2.0-flash")
 
 # ---------------------------------------------------------
-# 🔥 STIMA CALORIE CON AI (Groq + LLaMA 3.1 70B)
+# 🔥 STIMA CALORIE CON GEMINI FLASH
 # ---------------------------------------------------------
-def stima_calorie(cibo):
+def stima_calorie(cibo: str) -> int:
     prompt = f"""
-    Sei un nutrizionista italiano esperto. Stima le calorie totali del seguente piatto:
-    '{cibo}'.
+Sei un nutrizionista. Stima le calorie totali del seguente alimento o piatto:
 
-    Regole:
-    - Considera una porzione media italiana.
-    - Usa valori realistici basati sulla cucina italiana.
-    - Se il piatto è composto da più ingredienti, somma le calorie.
-    - Una pizza margherita intera NON può avere meno di 700 kcal.
-    - Una pizza margherita tipica sta tra 750 e 950 kcal.
-    - Una porzione di pasta NON può avere meno di 350 kcal.
-    - Una porzione di pasta tipica sta tra 400 e 650 kcal.
-    - Un piatto di carne NON può avere meno di 200 kcal.
-    - Rispondi SOLO con un numero intero, senza testo aggiuntivo.
-    """
+\"{cibo}\"
+
+- Considera una porzione media realistica.
+- Se ci sono più ingredienti, somma le calorie.
+- Rispondi SOLO con un numero intero (le kcal stimate), senza testo aggiuntivo.
+"""
 
     try:
-        response = client.chat.completions.create(
-            model="llama3-70b-8192",
-            messages=[{"role": "user", "content": prompt}]
-        )
+        response = model.generate_content(prompt)
+        testo = response.text.strip()
 
-        testo = response.choices[0].message.content
-
-        # estrai numero
         match = re.search(r"\d+", testo)
         if match:
             return int(match.group(0))
 
-        return 500  # fallback
+        return 300
     except Exception as e:
-        print("Errore Groq:", e)
-        return 500
+        print("Errore Gemini:", e)
+        return 300
 
 
 # ---------------------------------------------------------
 # 🧠 RICONOSCIMENTO DEL PASTO
 # ---------------------------------------------------------
-def riconosci_pasto(testo):
+def riconosci_pasto(testo: str) -> str:
     testo = testo.lower()
 
     if "colazione" in testo or "stamattina" in testo or "mattina" in testo:
@@ -73,14 +65,14 @@ def riconosci_pasto(testo):
 
 
 # ---------------------------------------------------------
-# 🍽️ ESTRAZIONE DEL CIBO
+# 🍽️ ESTRAZIONE DEL CIBO (versione semplice, senza distruggere le parole)
 # ---------------------------------------------------------
-def estrai_cibo(testo):
+def estrai_cibo(testo: str) -> str:
     testo = testo.lower()
 
     parole_da_togliere = [
-        "ho mangiato", "oggi", "stamattina", "stasera", "a pranzo",
-        "a cena", "per", "la", "il", "una", "un", "ho preso"
+        "ho mangiato", "oggi", "stamattina", "stasera",
+        "a pranzo", "a cena", "per", "ho preso"
     ]
 
     for p in parole_da_togliere:
@@ -92,7 +84,7 @@ def estrai_cibo(testo):
 # ---------------------------------------------------------
 # 💾 SALVATAGGIO SU SUPABASE
 # ---------------------------------------------------------
-def salva_pasto(tipo, descrizione, kcal):
+def salva_pasto(tipo: str, descrizione: str, kcal: int):
     now = datetime.now()
 
     supabase.table("pasti").insert({
@@ -107,7 +99,9 @@ def salva_pasto(tipo, descrizione, kcal):
 # /start
 # ---------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Ciao! Scrivimi cosa hai mangiato e lo registro nel diario 🍎")
+    await update.message.reply_text(
+        "Ciao! Scrivimi cosa hai mangiato e lo registro nel diario con una stima delle calorie 🍎"
+    )
 
 
 # ---------------------------------------------------------
