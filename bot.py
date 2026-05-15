@@ -19,12 +19,10 @@ def stima_calorie(testo):
 # --- SALVATAGGIO SU SUPABASE ---
 def salva_pasto(tipo, descrizione, kcal):
     now = datetime.now()
-    data = now.strftime("%Y-%m-%d")
-    ora = now.strftime("%H:%M")
 
     supabase.table("pasti").insert({
-        "data": data,
-        "ora": ora,
+        "data": now.isoformat(),   # timestamptz valido
+        "ora": now.isoformat(),    # timestamptz valido
         "pasto": tipo,
         "descrizione": descrizione,
         "kcal": kcal
@@ -37,9 +35,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- COMANDO /test ---
 async def test_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
+        now = datetime.now()
+
         supabase.table("pasti").insert({
-            "data": "TEST",
-            "ora": "TEST",
+            "data": now.isoformat(),
+            "ora": now.isoformat(),
             "pasto": "test",
             "descrizione": "test di connessione",
             "kcal": 0
