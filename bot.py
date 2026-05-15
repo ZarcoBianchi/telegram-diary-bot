@@ -1,22 +1,64 @@
 import os
+from datetime import datetime
+from supabase import create_client
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
+# --- TOKEN TELEGRAM ---
 TOKEN = os.getenv("BOT_TOKEN")
 
-# finto calcolatore di calorie (poi lo colleghiamo a Nutritionix)
-def stima_calorie(testo):
-    return 100  # placeholder
+# --- SUPABASE ---
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# --- CALCOLO CALORIE (placeholder) ---
+def stima_calorie(testo):
+    return 100  # da sostituire con Nutritionix
+
+# --- SALVATAGGIO SU SUPABASE ---
+def salva_pasto(tipo, descrizione, kcal):
+    now = datetime.now()
+    data = now.strftime("%Y-%m-%d")
+    ora = now.strftime("%H:%M")
+
+    supabase.table("pasti").insert({
+        "data": data,
+        "ora": ora,
+        "pasto": tipo,
+        "descrizione": descrizione,
+        "kcal": kcal
+    }).execute()
+
+# --- COMANDI BOT ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Ciao! Scrivimi cosa hai mangiato e lo registro nel diario 🍎")
 
 async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    food = update.message.text
-    kcal = stima_calorie(food)
-    # per ora solo risposta, poi aggiungiamo il salvataggio
-    await update.message.reply_text(f"Ho registrato: {food} (~{kcal} kcal)")
+    testo = update.message.text.lower()
+    kcal = stima_calorie(testo)
 
+    # riconoscimento tipo pasto
+    if "colazione" in testo:
+        tipo = "colazione"
+    elif "pranzo" in testo:
+        tipo = "pranzo"
+    elif "cena" in testo:
+        tipo = "cena"
+    elif "merenda" in testo and "mattutina" in testo:
+        tipo = "merenda mattutina"
+    elif "merenda" in testo and "pomeridiana" in testo:
+        tipo = "merenda pomeridiana"
+    else:
+        tipo = "non specificato"
+
+    salva_pasto(tipo, testo, kcal)
+
+    await update.message.reply_text(
+        f"Registrato {tipo}: {testo} (~{kcal} kcal)"
+    )
+
+# --- AVVIO BOT ---
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
