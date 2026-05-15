@@ -20,11 +20,12 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 genai.configure(api_key=GEMINI_API_KEY)
 
-model = genai.GenerativeModel("gemini-2.0-flash")
+# MODELLO: Google AI Studio → Flash Lite
+model = genai.GenerativeModel("gemini-2.0-flash-lite")
 
 
 # ---------------------------------------------------------
-# STIMA CALORIE (versione naturale, senza regole brutte)
+# STIMA CALORIE (naturale, senza regole brutte)
 # ---------------------------------------------------------
 
 def stima_calorie(cibo: str) -> int:
@@ -45,12 +46,11 @@ Istruzioni:
         response = model.generate_content(prompt)
         testo = response.text.strip()
 
-        # Estrai il primo numero
         match = re.search(r"\d+", testo)
         if match:
             return int(match.group(0))
 
-        return 300  # fallback
+        return 300
     except Exception as e:
         print("Errore Gemini:", e)
         return 300
@@ -80,7 +80,6 @@ def riconosci_pasto(testo: str) -> str:
 def estrai_cibo(testo: str) -> str:
     testo = testo.lower()
 
-    # Rimuove solo frasi, NON articoli (per evitare "mela" → "me")
     frasi_da_togliere = [
         "ho mangiato",
         "oggi",
