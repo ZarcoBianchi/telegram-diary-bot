@@ -2,7 +2,7 @@ import os
 import re
 from datetime import datetime
 
-import google.generativeai as genai
+from groq import Groq
 from supabase import create_client
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
@@ -17,15 +17,14 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-genai.configure(api_key=GEMINI_API_KEY)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+client = Groq(api_key=GROQ_API_KEY)
 
-# MODELLO: Google AI Studio → Flash Lite
-model = genai.GenerativeModel("gemini-2.0-flash-lite")
+MODEL_NAME = "deepseek-r1-distill-llama-70b"
 
 
 # ---------------------------------------------------------
-# STIMA CALORIE (naturale, senza regole brutte)
+# STIMA CALORIE (DeepSeek R1 — ragionamento naturale)
 # ---------------------------------------------------------
 
 def stima_calorie(cibo: str) -> int:
@@ -34,7 +33,7 @@ Sei un nutrizionista italiano. Stima le calorie totali del seguente alimento o p
 
 \"{cibo}\"
 
-Istruzioni:
+Linee guida:
 - Considera una porzione standard italiana.
 - Se è un piatto completo (pizza, pasta, panino), considera la porzione intera.
 - Se è un alimento singolo (mela, yogurt), usa valori realistici.
@@ -43,8 +42,15 @@ Istruzioni:
 """
 
     try:
-        response = model.generate_content(prompt)
-        testo = response.text.strip()
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+        testo = response.choices[0].message.content.strip()
+
+        # DeepSeek sometimes adds reasoning tags like <think>...</think>
+        testo = re.sub(r"<think>.*?</think>", "", testo, flags=re.DOTALL).strip()
 
         match = re.search(r"\d+", testo)
         if match:
@@ -52,7 +58,7 @@ Istruzioni:
 
         return 300
     except Exception as e:
-        print("Errore Gemini:", e)
+        print("Errore DeepSeek:", e)
         return 300
 
 
@@ -140,10 +146,15 @@ async def test_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        risposta = model.generate_content("Dimmi un numero a caso tra 1 e 1000.")
-        await update.message.reply_text("Risposta Gemini: " + risposta.text)
+        risposta = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "Dimmi un numero a caso tra 1 e 1000."}]
+        )
+        testo = risposta.choices[0].message.content
+        testo = re.sub(r"<think>.*?</think>", "", testo, flags=re.DOTALL).strip()
+        await update.message.reply_text("Risposta DeepSeek: " + testo)
     except Exception as e:
-        await update.message.reply_text(f"Errore Gemini: {e}")
+        await update.message.reply_text(f"Errore DeepSeek: {e}")
 
 
 # ---------------------------------------------------------
