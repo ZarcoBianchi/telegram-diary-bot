@@ -21,8 +21,8 @@ def salva_pasto(tipo, descrizione, kcal):
     now = datetime.now()
 
     supabase.table("pasti").insert({
-        "data": now.isoformat(),   # timestamptz valido
-        "ora": now.isoformat(),    # timestamptz valido
+        # 'data' viene gestita da Supabase (default now())
+        "ora": now.isoformat(),  # timestamptz valido
         "pasto": tipo,
         "descrizione": descrizione,
         "kcal": kcal
@@ -38,7 +38,6 @@ async def test_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         now = datetime.now()
 
         supabase.table("pasti").insert({
-            "data": now.isoformat(),
             "ora": now.isoformat(),
             "pasto": "test",
             "descrizione": "test di connessione",
