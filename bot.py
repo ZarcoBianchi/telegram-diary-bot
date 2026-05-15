@@ -1,6 +1,7 @@
 import os
-import requests
+import re
 from datetime import datetime
+from groq import Groq
 from supabase import create_client
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
@@ -13,45 +14,49 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# --- GROQ CLIENT ---
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
 # ---------------------------------------------------------
-# 🔥 STIMA CALORIE CON OPENFOODFACTS (GRATIS)
+# 🔥 STIMA CALORIE CON AI (Groq + LLaMA 3.1 8B)
 # ---------------------------------------------------------
 def stima_calorie(cibo):
-    url = "https://world.openfoodfacts.org/cgi/search.pl"
+    prompt = f"""
+    Stima le calorie totali del seguente alimento o piatto:
+    '{cibo}'.
 
-    params = {
-        "search_terms": cibo,
-        "search_simple": 1,
-        "action": "process",
-        "json": 1
-    }
+    Considera una porzione media italiana.
+    Rispondi SOLO con un numero intero, senza testo aggiuntivo.
+    """
 
     try:
-        r = requests.get(url, params=params)
-        data = r.json()
+        response = client.chat.completions.create(
+            model="llama3-8b-8192",
+            messages=[{"role": "user", "content": prompt}]
+        )
 
-        if "products" in data and len(data["products"]) > 0:
-            prodotto = data["products"][0]
-            nutr = prodotto.get("nutriments", {})
+        testo = response.choices[0].message.content
 
-            kcal = nutr.get("energy-kcal_100g")
-            if kcal:
-                return int(kcal)
+        # estrai numero
+        match = re.search(r"\d+", testo)
+        if match:
+            return int(match.group(0))
 
-        return 100  # fallback se non trova nulla
-    except:
-        return 100  # fallback in caso di errore
-        
+        return 250  # fallback
+    except Exception as e:
+        print("Errore Groq:", e)
+        return 250
+
 
 # ---------------------------------------------------------
-# 🧠 RICONOSCIMENTO DEL PASTO (linguaggio naturale)
+# 🧠 RICONOSCIMENTO DEL PASTO
 # ---------------------------------------------------------
 def riconosci_pasto(testo):
     testo = testo.lower()
 
     if "colazione" in testo or "stamattina" in testo or "mattina" in testo:
         return "colazione"
-    if "pranzo" in testo or "mezzogiorno" in testo or "oggi a pranzo" in testo:
+    if "pranzo" in testo or "mezzogiorno" in testo:
         return "pranzo"
     if "cena" in testo or "stasera" in testo or "sera" in testo:
         return "cena"
@@ -60,7 +65,7 @@ def riconosci_pasto(testo):
 
 
 # ---------------------------------------------------------
-# 🍽️ ESTRAZIONE DEL CIBO DAL TESTO
+# 🍽️ ESTRAZIONE DEL CIBO
 # ---------------------------------------------------------
 def estrai_cibo(testo):
     testo = testo.lower()
@@ -83,7 +88,6 @@ def salva_pasto(tipo, descrizione, kcal):
     now = datetime.now()
 
     supabase.table("pasti").insert({
-        # 'data' viene gestita da Supabase (default now())
         "ora": now.isoformat(),
         "pasto": tipo,
         "descrizione": descrizione,
@@ -118,7 +122,7 @@ async def test_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------
-# LOGICA PRINCIPALE DEL BOT
+# LOGICA PRINCIPALE
 # ---------------------------------------------------------
 async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
     testo = update.message.text
