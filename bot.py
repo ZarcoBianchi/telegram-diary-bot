@@ -20,11 +20,11 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 
-MODEL_NAME = "deepseek-r1-distill-llama-70b"
+MODEL_NAME = "llama-3.1-70b-versatile"
 
 
 # ---------------------------------------------------------
-# STIMA CALORIE (DeepSeek R1 — ragionamento naturale)
+# STIMA CALORIE (LLaMA 3.1 70B — ragionamento naturale)
 # ---------------------------------------------------------
 
 def stima_calorie(cibo: str) -> int:
@@ -33,7 +33,7 @@ Sei un nutrizionista italiano. Stima le calorie totali del seguente alimento o p
 
 \"{cibo}\"
 
-Linee guida:
+Istruzioni:
 - Considera una porzione standard italiana.
 - Se è un piatto completo (pizza, pasta, panino), considera la porzione intera.
 - Se è un alimento singolo (mela, yogurt), usa valori realistici.
@@ -49,16 +49,13 @@ Linee guida:
 
         testo = response.choices[0].message.content.strip()
 
-        # DeepSeek sometimes adds reasoning tags like <think>...</think>
-        testo = re.sub(r"<think>.*?</think>", "", testo, flags=re.DOTALL).strip()
-
         match = re.search(r"\d+", testo)
         if match:
             return int(match.group(0))
 
         return 300
     except Exception as e:
-        print("Errore DeepSeek:", e)
+        print("Errore LLaMA:", e)
         return 300
 
 
@@ -80,7 +77,7 @@ def riconosci_pasto(testo: str) -> str:
 
 
 # ---------------------------------------------------------
-# ESTRAZIONE DEL CIBO (versione corretta)
+# ESTRAZIONE DEL CIBO
 # ---------------------------------------------------------
 
 def estrai_cibo(testo: str) -> str:
@@ -150,11 +147,10 @@ async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
             model=MODEL_NAME,
             messages=[{"role": "user", "content": "Dimmi un numero a caso tra 1 e 1000."}]
         )
-        testo = risposta.choices[0].message.content
-        testo = re.sub(r"<think>.*?</think>", "", testo, flags=re.DOTALL).strip()
-        await update.message.reply_text("Risposta DeepSeek: " + testo)
+        testo = risposta.choices[0].message.content.strip()
+        await update.message.reply_text("Risposta LLaMA: " + testo)
     except Exception as e:
-        await update.message.reply_text(f"Errore DeepSeek: {e}")
+        await update.message.reply_text(f"Errore LLaMA: {e}")
 
 
 # ---------------------------------------------------------
