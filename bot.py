@@ -1,4 +1,5 @@
 import os
+import requests
 from datetime import datetime
 from supabase import create_client
 from telegram import Update
@@ -12,16 +13,42 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# --- STIMA CALORIE (placeholder) ---
+# ---------------------------------------------------------
+# 🔥 STIMA CALORIE CON OPENFOODFACTS (GRATIS)
+# ---------------------------------------------------------
 def stima_calorie(cibo):
-    # qui in futuro colleghiamo Nutritionix
-    return 100
+    url = "https://world.openfoodfacts.org/cgi/search.pl"
 
-# --- RICONOSCIMENTO PASTO ---
+    params = {
+        "search_terms": cibo,
+        "search_simple": 1,
+        "action": "process",
+        "json": 1
+    }
+
+    try:
+        r = requests.get(url, params=params)
+        data = r.json()
+
+        if "products" in data and len(data["products"]) > 0:
+            prodotto = data["products"][0]
+            nutr = prodotto.get("nutriments", {})
+
+            kcal = nutr.get("energy-kcal_100g")
+            if kcal:
+                return int(kcal)
+
+        return 100  # fallback se non trova nulla
+    except:
+        return 100  # fallback in caso di errore
+        
+
+# ---------------------------------------------------------
+# 🧠 RICONOSCIMENTO DEL PASTO (linguaggio naturale)
+# ---------------------------------------------------------
 def riconosci_pasto(testo):
     testo = testo.lower()
 
-    # indicatori temporali
     if "colazione" in testo or "stamattina" in testo or "mattina" in testo:
         return "colazione"
     if "pranzo" in testo or "mezzogiorno" in testo or "oggi a pranzo" in testo:
@@ -29,21 +56,29 @@ def riconosci_pasto(testo):
     if "cena" in testo or "stasera" in testo or "sera" in testo:
         return "cena"
 
-    # fallback
     return "non specificato"
 
-# --- ESTRAZIONE CIBO ---
+
+# ---------------------------------------------------------
+# 🍽️ ESTRAZIONE DEL CIBO DAL TESTO
+# ---------------------------------------------------------
 def estrai_cibo(testo):
     testo = testo.lower()
 
-    # rimuovi parole che non servono
-    parole_da_togliere = ["ho mangiato", "oggi", "stamattina", "stasera", "a pranzo", "a cena", "per", "la", "il"]
+    parole_da_togliere = [
+        "ho mangiato", "oggi", "stamattina", "stasera", "a pranzo",
+        "a cena", "per", "la", "il", "una", "un", "ho preso"
+    ]
+
     for p in parole_da_togliere:
         testo = testo.replace(p, "")
 
     return testo.strip()
 
-# --- SALVATAGGIO SU SUPABASE ---
+
+# ---------------------------------------------------------
+# 💾 SALVATAGGIO SU SUPABASE
+# ---------------------------------------------------------
 def salva_pasto(tipo, descrizione, kcal):
     now = datetime.now()
 
@@ -55,11 +90,17 @@ def salva_pasto(tipo, descrizione, kcal):
         "kcal": kcal
     }).execute()
 
-# --- COMANDO /start ---
+
+# ---------------------------------------------------------
+# /start
+# ---------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Ciao! Scrivimi cosa hai mangiato e lo registro nel diario 🍎")
 
-# --- COMANDO /test ---
+
+# ---------------------------------------------------------
+# /test
+# ---------------------------------------------------------
 async def test_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         now = datetime.now()
@@ -75,7 +116,10 @@ async def test_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Errore: {e}")
 
-# --- LOGICA PRINCIPALE ---
+
+# ---------------------------------------------------------
+# LOGICA PRINCIPALE DEL BOT
+# ---------------------------------------------------------
 async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
     testo = update.message.text
 
@@ -89,7 +133,10 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Registrato {tipo}: {cibo} (~{kcal} kcal)"
     )
 
-# --- AVVIO BOT ---
+
+# ---------------------------------------------------------
+# AVVIO BOT
+# ---------------------------------------------------------
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
