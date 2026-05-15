@@ -18,25 +18,28 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 # ---------------------------------------------------------
-# 🔥 STIMA CALORIE CON AI (Groq + LLaMA 3.1 8B)
+# 🔥 STIMA CALORIE CON AI (Groq + LLaMA 3.1 70B)
 # ---------------------------------------------------------
 def stima_calorie(cibo):
     prompt = f"""
-    Sei un nutrizionista italiano. Stima le calorie totali del seguente piatto:
+    Sei un nutrizionista italiano esperto. Stima le calorie totali del seguente piatto:
     '{cibo}'.
 
     Regole:
     - Considera una porzione media italiana.
     - Usa valori realistici basati sulla cucina italiana.
     - Se il piatto è composto da più ingredienti, somma le calorie.
-    - Una pizza margherita intera NON può avere meno di 600 kcal.
-    - Una porzione di pasta NON può avere meno di 300 kcal.
+    - Una pizza margherita intera NON può avere meno di 700 kcal.
+    - Una pizza margherita tipica sta tra 750 e 950 kcal.
+    - Una porzione di pasta NON può avere meno di 350 kcal.
+    - Una porzione di pasta tipica sta tra 400 e 650 kcal.
+    - Un piatto di carne NON può avere meno di 200 kcal.
     - Rispondi SOLO con un numero intero, senza testo aggiuntivo.
     """
 
     try:
         response = client.chat.completions.create(
-            model="llama3-8b-8192",
+            model="llama3-70b-8192",
             messages=[{"role": "user", "content": prompt}]
         )
 
@@ -47,10 +50,10 @@ def stima_calorie(cibo):
         if match:
             return int(match.group(0))
 
-        return 400  # fallback
+        return 500  # fallback
     except Exception as e:
         print("Errore Groq:", e)
-        return 400
+        return 500
 
 
 # ---------------------------------------------------------
