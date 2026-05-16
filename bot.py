@@ -1,11 +1,19 @@
 import os
 import re
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+from dateutil import parser as dateparser
 
 from groq import Groq
 from supabase import create_client
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters
+)
 
 # ---------------------------------------------------------
 # CONFIGURAZIONE
@@ -24,6 +32,57 @@ MODEL_NAME = "llama-3.3-70b-versatile"
 
 # SOLO TU PUOI USARE IL BOT
 ALLOWED_USER_ID = 1042036959
+
+
+# ---------------------------------------------------------
+# UTILS: PARSING DATE NATURALI
+# ---------------------------------------------------------
+
+def parse_natural_date(testo: str) -> date:
+    testo = testo.lower()
+
+    oggi = date.today()
+
+    if "oggi" in testo:
+        return oggi
+    if "ieri" in testo:
+        return oggi - timedelta(days=1)
+    if "l'altro ieri" in testo or "l’altro ieri" in testo:
+        return oggi - timedelta(days=2)
+    if "due giorni fa" in testo:
+        return oggi - timedelta(days=2)
+    if "tre giorni fa" in testo:
+        return oggi - timedelta(days=3)
+
+    # Giorni della settimana
+    giorni = {
+        "lunedì": 0, "lunedi": 0,
+        "martedì": 1, "martedi": 1,
+        "mercoledì": 2,
+        "giovedì": 3, "giovedi": 3,
+        "venerdì": 4, "venerdi": 4,
+        "sabato": 5,
+        "domenica": 6
+    }
+
+    for g, idx in giorni.items():
+        if g in testo:
+            oggi_idx = oggi.weekday()
+            delta = oggi_idx - idx
+            if delta < 0:
+                delta += 7
+            return oggi - timedelta(days=delta)
+
+    # Date esplicite (12 maggio, 12/05, 12-05-2026)
+    try:
+        d = dateparser.parse(testo, dayfirst=True)
+        if d:
+            return d.date()
+    except:
+        pass
+
+    # Default: oggi
+    return oggi
 
 
 # ---------------------------------------------------------
@@ -61,8 +120,7 @@ Linee guida:
         if match:
             return int(match.group(0))
         return 300
-    except Exception as e:
-        print("Errore LLaMA:", e)
+    except:
         return 300
 
 
@@ -116,17 +174,130 @@ def salva_pasto(tipo: str, descrizione: str, kcal: int):
 
 def somma_calorie(pasto_richiesto: str = None):
     oggi = date.today().isoformat()
-    dati = supabase.table("pasti").select("pasto,kcal,ora").execute()
+    dati = supabase.table("pasti").select("*").execute()
     totale = 0
 
     for r in dati.data:
-        if r["kcal"] > 0 and r["ora"].startswith(oggi):
+        if r["ora"].startswith(oggi):
             if pasto_richiesto:
                 if r["pasto"] == pasto_richiesto:
                     totale += r["kcal"]
             else:
                 totale += r["kcal"]
     return totale
+
+
+# ---------------------------------------------------------
+# CANCELLAZIONE: LOGICA PRINCIPALE
+# ---------------------------------------------------------
+
+async def cancella(update: Update, testo: str):
+    data = parse_natural_date(testo)
+    data_str = data.isoformat()
+
+    # Cancella ultimo pasto
+    if "ultimo" in testo or "ultima" in testo:
+        dati = supabase.table("pasti").select("*").order("id", desc=True).limit(1).execute()
+        if not dati.data:
+            await update.message.reply_text("Non ci sono pasti da cancellare.")
+            return
+
+        r = dati.data[0]
+        supabase.table("pasti").delete().eq("id", r["id"]).execute()
+        await update.message.reply_text(f"Ho cancellato l'ultimo pasto: {r['descrizione']} (~{r['kcal']} kcal)")
+        return
+
+    # Cancella un intero pasto (colazione/pranzo/cena)
+    for pasto in ["colazione", "pranzo", "cena"]:
+        if pasto in testo:
+            dati = supabase.table("pasti").select("*").execute()
+            da_cancellare = [r for r in dati.data if r["pasto"] == pasto and r["ora"].startswith(data_str)]
+
+            if not da_cancellare:
+                await update.message.reply_text(f"Nessun {pasto} trovato per la data richiesta.")
+                return
+
+            for r in da_cancellare:
+                supabase.table("pasti").delete().eq("id", r["id"]).execute()
+
+            totale = somma_calorie()
+            await update.message.reply_text(
+                f"Ho cancellato tutto il {pasto}.\n\nTotale giornaliero aggiornato: {totale} kcal"
+            )
+            return
+
+    # Cancella un alimento specifico
+    # Estraggo la parola dopo "cancella"
+    match = re.search(r"cancella (.*)", testo)
+    if not match:
+        await update.message.reply_text("Dimmi cosa vuoi cancellare.")
+        return
+
+    alimento = match.group(1).strip()
+
+    dati = supabase.table("pasti").select("*").execute()
+    candidati = [r for r in dati.data if alimento in r["descrizione"] and r["ora"].startswith(data_str)]
+
+    if not candidati:
+        await update.message.reply_text("Non ho trovato nulla da cancellare.")
+        return
+
+    # Se c'è una sola riga → cancella subito
+    if len(candidati) == 1:
+        r = candidati[0]
+        supabase.table("pasti").delete().eq("id", r["id"]).execute()
+
+        # Riepilogo pasto aggiornato
+        totale = somma_calorie(r["pasto"])
+        await update.message.reply_text(
+            f"Ho cancellato: {r['descrizione']} (~{r['kcal']} kcal)\n\n"
+            f"{r['pasto'].capitalize()} aggiornato: {totale} kcal"
+        )
+        return
+
+    # Se ci sono più righe → bottoni inline
+    keyboard = []
+    for r in candidati:
+        label = f"{r['descrizione']} - {r['ora'][11:16]}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"del_{r['id']}")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        "Ho trovato più elementi simili. Quale vuoi cancellare?",
+        reply_markup=reply_markup
+    )
+
+
+# ---------------------------------------------------------
+# CALLBACK BOTTONI INLINE
+# ---------------------------------------------------------
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data.startswith("del_"):
+        id_da_cancellare = int(query.data.replace("del_", ""))
+
+        # Recupero la riga prima di cancellarla
+        dati = supabase.table("pasti").select("*").eq("id", id_da_cancellare).execute()
+        if not dati.data:
+            await query.edit_message_text("Elemento già cancellato.")
+            return
+
+        r = dati.data[0]
+
+        # Cancello
+        supabase.table("pasti").delete().eq("id", id_da_cancellare).execute()
+
+        # Riepilogo pasto aggiornato
+        totale = somma_calorie(r["pasto"])
+
+        await query.edit_message_text(
+            f"Ho cancellato: {r['descrizione']} (~{r['kcal']} kcal)\n\n"
+            f"{r['pasto'].capitalize()} aggiornato: {totale} kcal"
+        )
 
 
 # ---------------------------------------------------------
@@ -139,7 +310,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "Ciao! Scrivimi cosa hai mangiato e lo registro nel diario 🍎"
+        "Ciao! Scrivimi cosa hai mangiato o chiedimi di cancellare qualcosa 🍎"
     )
 
 
@@ -148,15 +319,12 @@ async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Non sei autorizzato a usare questo bot.")
         return
 
-    try:
-        risposta = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{"role": "user", "content": "Dimmi un numero a caso tra 1 e 1000."}]
-        )
-        testo = risposta.choices[0].message.content.strip()
-        await update.message.reply_text("Risposta LLaMA: " + testo)
-    except Exception as e:
-        await update.message.reply_text(f"Errore LLaMA: {e}")
+    risposta = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Dimmi un numero a caso tra 1 e 1000."}]
+    )
+    testo = risposta.choices[0].message.content.strip()
+    await update.message.reply_text("Risposta LLaMA: " + testo)
 
 
 # ---------------------------------------------------------
@@ -166,14 +334,18 @@ async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
 
-    # BLOCCO UTENTI NON AUTORIZZATI
     if user_id != ALLOWED_USER_ID:
         await update.message.reply_text("❌ Non sei autorizzato a usare questo bot.")
         return
 
     testo = update.message.text.lower()
 
-    # 🔍 Se l'utente chiede la somma delle calorie
+    # CANCELLAZIONE
+    if "cancella" in testo or "elimina" in testo or "rimuovi" in testo or "annulla" in testo:
+        await cancella(update, testo)
+        return
+
+    # SOMMA CALORIE
     if "conto" in testo or "totale" in testo or "somma" in testo or "quante calorie" in testo:
         if "colazione" in testo:
             totale = somma_calorie("colazione")
@@ -192,7 +364,7 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Totale giornaliero: {totale} kcal 🔥")
             return
 
-    # 🔍 Altrimenti registra il pasto
+    # REGISTRAZIONE PASTO
     tipo = riconosci_pasto(testo)
     cibo = estrai_cibo(testo)
     kcal = stima_calorie(cibo)
@@ -209,5 +381,6 @@ if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("debug", debug))
+    app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, log_food))
     app.run_polling()
