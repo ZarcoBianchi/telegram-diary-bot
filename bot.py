@@ -22,6 +22,9 @@ client = Groq(api_key=GROQ_API_KEY)
 
 MODEL_NAME = "llama-3.3-70b-versatile"
 
+# SOLO TU PUOI USARE IL BOT
+ALLOWED_USER_ID = 1042036959
+
 
 # ---------------------------------------------------------
 # STIMA CALORIE (intelligente con quantità e bevande)
@@ -131,12 +134,20 @@ def somma_calorie(pasto_richiesto: str = None):
 # ---------------------------------------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ALLOWED_USER_ID:
+        await update.message.reply_text("❌ Non sei autorizzato a usare questo bot.")
+        return
+
     await update.message.reply_text(
-        "Ciao! Scrivimi cosa hai mangiato o chiedimi quante calorie hai assunto oggi 🍎"
+        "Ciao! Scrivimi cosa hai mangiato e lo registro nel diario 🍎"
     )
 
 
 async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ALLOWED_USER_ID:
+        await update.message.reply_text("❌ Non sei autorizzato a usare questo bot.")
+        return
+
     try:
         risposta = client.chat.completions.create(
             model=MODEL_NAME,
@@ -153,6 +164,13 @@ async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------
 
 async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+
+    # BLOCCO UTENTI NON AUTORIZZATI
+    if user_id != ALLOWED_USER_ID:
+        await update.message.reply_text("❌ Non sei autorizzato a usare questo bot.")
+        return
+
     testo = update.message.text.lower()
 
     # 🔍 Se l'utente chiede la somma delle calorie
