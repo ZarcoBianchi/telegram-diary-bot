@@ -128,7 +128,6 @@ Messaggio: "{testo}"
         )
         raw = response.choices[0].message.content.strip()
 
-        # Estrai il JSON in modo blindato
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         if not match:
             return {"intento": "non_chiaro"}
@@ -140,7 +139,6 @@ Messaggio: "{testo}"
         except:
             return {"intento": "non_chiaro"}
 
-        # Normalizza
         if not isinstance(data, dict):
             return {"intento": "non_chiaro"}
 
@@ -320,7 +318,6 @@ async def cancella_ai(update: Update, testo: str, intent: dict):
     alimento = intent.get("alimento", "").strip()
 
     if not alimento:
-        # cancella ultimo
         r = sorted(candidati, key=lambda x: x["id"], reverse=True)[0]
         supabase.table("pasti").delete().eq("id", r["id"]).execute()
         await update.message.reply_text(f"Ho cancellato: {r['descrizione']} ({r['kcal']} kcal)")
@@ -401,7 +398,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
 
-    # timeout?
     if check_pending_timeout(context):
         await query.edit_message_text("Richiesta scaduta.")
         ud["pending_add"] = None
@@ -409,7 +405,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ud["pending_timestamp"] = None
         return
 
-    # cancellazione
     if data.startswith("del_"):
         id_da_cancellare = int(data.replace("del_", ""))
         res = supabase.table("pasti").select("*").eq("id", id_da_cancellare).execute()
@@ -421,7 +416,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"Ho cancellato: {r['descrizione']} ({r['kcal']} kcal)")
         return
 
-    # conferma aggiunta
     if data == "add_confirm_yes":
         pending = ud.get("pending_add")
         if not pending:
@@ -524,23 +518,132 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
     testo = update.message.text.strip()
     ud = context.user_data
 
-    # Se pending scaduto → reset
     if check_pending_timeout(context):
         await reset_pending(update, context)
 
-    # Se pending attivo e l'utente scrive testo → reset
     if ud.get("pending_add") or ud.get("pending_add_ask_pasto"):
         await reset_pending(update, context)
 
     intent = classify_intent(testo)
     now = datetime.now()
 
-    # aggiungi
     if intent["intento"] == "aggiungi":
         alimento = intent.get("alimento", testo).strip()
         pasto_txt = riconosci_pasto_da_testo(testo)
 
-        # data
         if intent.get("data") == "ieri":
             d = date.today() - timedelta(days=1)
-        elif intent.get("data") == "
+        elif intent.get("data") == "oggi" or not intent.get("data"):
+            d = date.today()
+        else:
+            d = parse_natural_date(intent.get("testo_data", testo))
+
+        if pasto_txt != "non_specificato":
+            kcal = stima_calorie(alimento)
+            salva_pasto(pasto_txt, alimento, kcal, d)
+            await update.message.reply_text(
+                f"Registrato {pasto_txt}: {alimento} ({kcal} kcal)"
+            )
+            return
+
+        pasto_suggerito = suggerisci_pasto_da_orario(now)
+        if pasto_suggerito == "non_specificato":
+            ud["pending_add_ask_pasto"] = {"alimento": alimento, "data": d}
+            ud["pending_timestamp"] = time.time()
+            keyboard = [
+                [
+                    InlineKeyboardButton("Colazione", callback_data="add_set_colazione"),
+                    InlineKeyboardButton("Pranzo", callback_data="add_set_pranzo"),
+                    InlineKeyboardButton("Cena", callback_data="add_set_cena"),
+                ]
+            ]
+            await update.message.reply_text(
+                f"Per quale pasto hai mangiato {alimento}?",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        ud["pending_add"] = {
+            "alimento": alimento,
+            "pasto_suggerito": pasto_suggerito,
+            "data": d,
+        }
+        ud["pending_timestamp"] = time.time()
+        keyboard = [
+            [
+                InlineKeyboardButton("Sì", callback_data="add_confirm_yes"),
+                InlineKeyboardButton("No", callback_data="add_confirm_no"),
+            ]
+        ]
+        await update.message.reply_text(
+            f"Hai mangiato {alimento} per {pasto_suggerito}?",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if intent["intento"] == "cancella":
+        await cancella_ai(update, testo, intent)
+        return
+
+    if intent["intento"] == "riepilogo_pasto":
+        pasto = intent.get("pasto", "pranzo")
+        if intent.get("data") == "ieri":
+            d = date.today() - timedelta(days=1)
+        elif intent.get("data") == "oggi" or not intent.get("data"):
+            d = date.today()
+        else:
+            d = parse_natural_date(intent.get("testo_data", testo))
+        msg = format_riepilogo_pasto(d, pasto)
+        await update.message.reply_text(msg)
+        return
+
+    if intent["intento"] == "riepilogo_giorno":
+        if intent.get("data") == "ieri":
+            d = date.today() - timedelta(days=1)
+        elif intent.get("data") == "oggi" or not intent.get("data"):
+            d = date.today()
+        else:
+            d = parse_natural_date(intent.get("testo_data", testo))
+        msg = format_riepilogo_giorno(d)
+        await update.message.reply_text(msg)
+        return
+
+    if intent["intento"] == "somma_giorno":
+        if intent.get("data") == "ieri":
+            d = date.today() - timedelta(days=1)
+        elif intent.get("data") == "oggi" or not intent.get("data"):
+            d = date.today()
+        else:
+            d = parse_natural_date(intent.get("testo_data", testo))
+        tot = somma_calorie_giorno(d)
+        await update.message.reply_text(f"Totale giornaliero: {tot} kcal")
+        return
+
+    if intent["intento"] == "somma_pasto":
+        pasto = intent.get("pasto", "pranzo")
+        if intent.get("data") == "ieri":
+            d = date.today() - timedelta(days=1)
+        elif intent.get("data") == "oggi" or not intent.get("data"):
+            d = date.today()
+        else:
+            d = parse_natural_date(intent.get("testo_data", testo))
+        tot = somma_calorie_pasto(d, pasto)
+        await update.message.reply_text(f"Totale {pasto}: {tot} kcal")
+        return
+
+    await update.message.reply_text(
+        "Non ho capito bene cosa vuoi fare. Puoi dirmi cosa hai mangiato o chiedermi un riepilogo."
+    )
+
+
+# ---------------------------------------------------------
+# AVVIO BOT
+# ---------------------------------------------------------
+
+if __name__ == "__main__":
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("debug", debug))
+    app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, log_food))
+    app.run_polling()
