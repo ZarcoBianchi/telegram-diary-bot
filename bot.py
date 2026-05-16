@@ -40,7 +40,6 @@ ALLOWED_USER_ID = 1042036959
 
 def parse_natural_date(testo: str) -> date:
     testo = testo.lower()
-
     oggi = date.today()
 
     if "oggi" in testo:
@@ -73,7 +72,7 @@ def parse_natural_date(testo: str) -> date:
                 delta += 7
             return oggi - timedelta(days=delta)
 
-    # Date esplicite (12 maggio, 12/05, 12-05-2026)
+    # Date esplicite
     try:
         d = dateparser.parse(testo, dayfirst=True)
         if d:
@@ -81,32 +80,32 @@ def parse_natural_date(testo: str) -> date:
     except:
         pass
 
-    # Default: oggi
     return oggi
 
 
 # ---------------------------------------------------------
-# STIMA CALORIE (intelligente con quantità e bevande)
+# AI MATCHING: CAPISCE COSA INTENDI CANCELLARE
 # ---------------------------------------------------------
 
-def stima_calorie(cibo: str) -> int:
+def ai_match(comando: str, descrizione: str) -> bool:
     prompt = f"""
-Sei un nutrizionista italiano. Stima le calorie totali del seguente alimento o piatto:
+Sei un assistente che interpreta comandi per un diario alimentare.
 
-\"{cibo}\"
+L’utente vuole cancellare qualcosa.
+Comando dell’utente: "{comando}"
+Riga registrata: "{descrizione}"
 
-Linee guida:
-- Considera una porzione standard italiana.
-- Se è un piatto completo (pizza, pasta, panino), considera la porzione intera.
-- Se è un alimento singolo (mela, yogurt), usa valori realistici.
-- Se è una bevanda, interpreta la quantità:
-  * bicchiere di vino = 100 kcal
-  * lattina di birra = 150 kcal
-  * tazza di cappuccino = 80 kcal
-  * bottiglia d'acqua = 0 kcal
-  * bicchiere di succo = 90 kcal
-- Se ci sono più ingredienti, somma le calorie.
-- Rispondi SOLO con un numero intero (le kcal stimate), senza testo aggiuntivo.
+Devi capire se l’utente si riferisce a questa riga.
+
+Regole:
+- Se l’utente dice "vino", considera solo bevande, non piatti con vino.
+- Se l’utente dice "pizza", considera solo pizze, non "pizzette" o "pizzoccheri".
+- Se l’utente dice "cancella il bicchiere", e la riga contiene una bevanda, rispondi SI.
+- Se l’utente dice "cancella il vino rosso", e la riga contiene "bicchiere di vino rosso", rispondi SI.
+- Se l’utente dice "cancella il vino", e la riga contiene "vino rosso" o "vino bianco", rispondi SI.
+- Se non è chiaramente lo stesso alimento, rispondi NO.
+
+Rispondi SOLO con: SI o NO.
 """
 
     try:
@@ -114,7 +113,30 @@ Linee guida:
             model=MODEL_NAME,
             messages=[{"role": "user", "content": prompt}]
         )
+        testo = response.choices[0].message.content.strip().upper()
+        return "SI" in testo
+    except:
+        return False
 
+
+# ---------------------------------------------------------
+# STIMA CALORIE
+# ---------------------------------------------------------
+
+def stima_calorie(cibo: str) -> int:
+    prompt = f"""
+Stima le calorie totali del seguente alimento:
+
+\"{cibo}\"
+
+Rispondi solo con un numero intero.
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": prompt}]
+        )
         testo = response.choices[0].message.content.strip()
         match = re.search(r"\d+", testo)
         if match:
@@ -125,33 +147,18 @@ Linee guida:
 
 
 # ---------------------------------------------------------
-# RICONOSCIMENTO DEL PASTO
+# RICONOSCIMENTO PASTO
 # ---------------------------------------------------------
 
 def riconosci_pasto(testo: str) -> str:
     testo = testo.lower()
-    if "colazione" in testo or "stamattina" in testo or "mattina" in testo:
+    if "colazione" in testo or "stamattina" in testo:
         return "colazione"
     if "pranzo" in testo or "mezzogiorno" in testo:
         return "pranzo"
-    if "cena" in testo or "stasera" in testo or "sera" in testo:
+    if "cena" in testo or "stasera" in testo:
         return "cena"
     return "non specificato"
-
-
-# ---------------------------------------------------------
-# ESTRAZIONE DEL CIBO
-# ---------------------------------------------------------
-
-def estrai_cibo(testo: str) -> str:
-    testo = testo.lower()
-    frasi_da_togliere = [
-        "ho mangiato", "oggi", "stamattina", "stasera",
-        "a pranzo", "a cena", "per", "ho preso"
-    ]
-    for f in frasi_da_togliere:
-        testo = testo.replace(f, "")
-    return testo.strip()
 
 
 # ---------------------------------------------------------
@@ -169,7 +176,7 @@ def salva_pasto(tipo: str, descrizione: str, kcal: int):
 
 
 # ---------------------------------------------------------
-# CALCOLO SOMMA CALORIE
+# SOMMA CALORIE
 # ---------------------------------------------------------
 
 def somma_calorie(pasto_richiesto: str = None):
@@ -188,7 +195,7 @@ def somma_calorie(pasto_richiesto: str = None):
 
 
 # ---------------------------------------------------------
-# CANCELLAZIONE: LOGICA PRINCIPALE
+# CANCELLAZIONE AI
 # ---------------------------------------------------------
 
 async def cancella(update: Update, testo: str):
@@ -207,7 +214,7 @@ async def cancella(update: Update, testo: str):
         await update.message.reply_text(f"Ho cancellato l'ultimo pasto: {r['descrizione']} (~{r['kcal']} kcal)")
         return
 
-    # Cancella un intero pasto (colazione/pranzo/cena)
+    # Cancella un intero pasto
     for pasto in ["colazione", "pranzo", "cena"]:
         if pasto in testo:
             dati = supabase.table("pasti").select("*").execute()
@@ -226,28 +233,24 @@ async def cancella(update: Update, testo: str):
             )
             return
 
-    # Cancella un alimento specifico
-    # Estraggo la parola dopo "cancella"
-    match = re.search(r"cancella (.*)", testo)
-    if not match:
-        await update.message.reply_text("Dimmi cosa vuoi cancellare.")
-        return
-
-    alimento = match.group(1).strip()
-
+    # Cancella alimento specifico (AI)
     dati = supabase.table("pasti").select("*").execute()
-    candidati = [r for r in dati.data if alimento in r["descrizione"] and r["ora"].startswith(data_str)]
+    candidati = []
+
+    for r in dati.data:
+        if r["ora"].startswith(data_str):
+            if ai_match(testo, r["descrizione"]):
+                candidati.append(r)
 
     if not candidati:
         await update.message.reply_text("Non ho trovato nulla da cancellare.")
         return
 
-    # Se c'è una sola riga → cancella subito
+    # Se uno solo → cancella subito
     if len(candidati) == 1:
         r = candidati[0]
         supabase.table("pasti").delete().eq("id", r["id"]).execute()
 
-        # Riepilogo pasto aggiornato
         totale = somma_calorie(r["pasto"])
         await update.message.reply_text(
             f"Ho cancellato: {r['descrizione']} (~{r['kcal']} kcal)\n\n"
@@ -255,7 +258,7 @@ async def cancella(update: Update, testo: str):
         )
         return
 
-    # Se ci sono più righe → bottoni inline
+    # Più righe → bottoni inline
     keyboard = []
     for r in candidati:
         label = f"{r['descrizione']} - {r['ora'][11:16]}"
@@ -280,7 +283,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data.startswith("del_"):
         id_da_cancellare = int(query.data.replace("del_", ""))
 
-        # Recupero la riga prima di cancellarla
         dati = supabase.table("pasti").select("*").eq("id", id_da_cancellare).execute()
         if not dati.data:
             await query.edit_message_text("Elemento già cancellato.")
@@ -288,10 +290,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         r = dati.data[0]
 
-        # Cancello
         supabase.table("pasti").delete().eq("id", id_da_cancellare).execute()
 
-        # Riepilogo pasto aggiornato
         totale = somma_calorie(r["pasto"])
 
         await query.edit_message_text(
@@ -366,7 +366,7 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # REGISTRAZIONE PASTO
     tipo = riconosci_pasto(testo)
-    cibo = estrai_cibo(testo)
+    cibo = testo
     kcal = stima_calorie(cibo)
 
     salva_pasto(tipo, cibo, kcal)
