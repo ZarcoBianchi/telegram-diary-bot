@@ -95,21 +95,21 @@ def date_to_iso(d: date) -> str:
 
 
 # ---------------------------------------------------------
-# AI: CLASSIFICAZIONE INTENTO (BLINDATA)
+# AI: CLASSIFICAZIONE INTENTO (SOLO AI, USATA DOPO FALLBACK)
 # ---------------------------------------------------------
 
-def classify_intent(testo: str) -> dict:
+def classify_intent_ai(testo: str) -> dict:
     prompt = f"""
 Sei un assistente che interpreta messaggi per un diario alimentare.
 
 Devi restituire un JSON con questo schema:
 
 {{
-  "intento": "...",
-  "alimento": "...",
-  "pasto": "...",
-  "data": "...",
-  "testo_data": "..."
+  "intento": "...",          // aggiungi, cancella, riepilogo_pasto, riepilogo_giorno, somma_pasto, somma_giorno, non_chiaro
+  "alimento": "...",         // opzionale
+  "pasto": "...",            // colazione, pranzo, cena, non_specificato
+  "data": "...",             // oggi, ieri, altro, oppure vuoto
+  "testo_data": "..."        // testo originale da cui dedurre la data, se serve
 }}
 
 Regole:
@@ -149,6 +149,62 @@ Messaggio: "{testo}"
 
     except:
         return {"intento": "non_chiaro"}
+
+
+# ---------------------------------------------------------
+# FALLBACK TESTUALE AGGRESSIVO (PRIMA DELL'AI)
+# ---------------------------------------------------------
+
+def fallback_intent(testo: str) -> dict | None:
+    t = testo.lower()
+
+    # cancella
+    if any(k in t for k in ["cancella", "elimina", "rimuovi"]):
+        return {"intento": "cancella"}
+
+    # somma pasto
+    if "quante calorie" in t and any(p in t for p in ["pranzo", "cena", "colazione"]):
+        pasto = "pranzo"
+        if "colazione" in t:
+            pasto = "colazione"
+        elif "cena" in t:
+            pasto = "cena"
+        data = "oggi"
+        if "ieri" in t:
+            data = "ieri"
+        return {"intento": "somma_pasto", "pasto": pasto, "data": data, "testo_data": testo}
+
+    # somma giorno
+    if "quante calorie" in t and any(k in t for k in ["oggi", "ieri"]):
+        data = "oggi"
+        if "ieri" in t:
+            data = "ieri"
+        return {"intento": "somma_giorno", "data": data, "testo_data": testo}
+
+    # riepilogo pasto
+    if "cosa ho mangiato" in t and any(p in t for p in ["pranzo", "cena", "colazione"]):
+        pasto = "pranzo"
+        if "colazione" in t:
+            pasto = "colazione"
+        elif "cena" in t:
+            pasto = "cena"
+        data = "oggi"
+        if "ieri" in t:
+            data = "ieri"
+        return {"intento": "riepilogo_pasto", "pasto": pasto, "data": data, "testo_data": testo}
+
+    # riepilogo giorno
+    if "cosa ho mangiato" in t and any(k in t for k in ["oggi", "ieri"]):
+        data = "oggi"
+        if "ieri" in t:
+            data = "ieri"
+        return {"intento": "riepilogo_giorno", "data": data, "testo_data": testo}
+
+    # aggiungi
+    if any(k in t for k in ["ho mangiato", "per pranzo ho", "per cena ho", "per colazione ho", "ho bevuto"]):
+        return {"intento": "aggiungi"}
+
+    return None
 
 
 # ---------------------------------------------------------
@@ -230,6 +286,63 @@ def suggerisci_pasto_da_orario(now: datetime) -> str:
 
 
 # ---------------------------------------------------------
+# ESTRAZIONE ALIMENTO (REGEX → AI)
+# ---------------------------------------------------------
+
+def estrai_alimento_regex(testo: str) -> str | None:
+    t = testo.lower()
+
+    patterns = [
+        r"ho mangiato (.+)",
+        r"per pranzo ho (.+)",
+        r"per cena ho (.+)",
+        r"per colazione ho (.+)",
+        r"ho bevuto (.+)",
+    ]
+
+    for p in patterns:
+        m = re.search(p, t)
+        if m:
+            return m.group(1).strip()
+
+    return None
+
+
+def estrai_alimento_ai(testo: str) -> str | None:
+    prompt = f"""
+Dal seguente messaggio estrai SOLO il nome dell'alimento o bevanda consumata.
+
+Messaggio: "{testo}"
+
+Rispondi SOLO con il nome dell'alimento, senza altre parole.
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.choices[0].message.content.strip()
+    except:
+        return None
+
+
+def estrai_alimento(testo: str, intent: dict) -> str:
+    if intent.get("alimento"):
+        return intent["alimento"].strip()
+
+    a = estrai_alimento_regex(testo)
+    if a:
+        return a
+
+    a = estrai_alimento_ai(testo)
+    if a:
+        return a
+
+    return testo.strip()
+
+
+# ---------------------------------------------------------
 # SUPABASE
 # ---------------------------------------------------------
 
@@ -300,12 +413,14 @@ def format_riepilogo_giorno(d: date) -> str:
 # ---------------------------------------------------------
 
 async def cancella_ai(update: Update, testo: str, intent: dict):
-    if intent.get("data") == "ieri":
+    t = testo.lower()
+
+    if "ieri" in t:
         d = date.today() - timedelta(days=1)
-    elif intent.get("data") == "oggi" or not intent.get("data"):
+    elif "oggi" in t:
         d = date.today()
     else:
-        d = parse_natural_date(intent.get("testo_data", testo))
+        d = parse_natural_date(testo)
 
     data_str = date_to_iso(d)
     res = supabase.table("pasti").select("*").execute()
@@ -316,12 +431,8 @@ async def cancella_ai(update: Update, testo: str, intent: dict):
         return
 
     alimento = intent.get("alimento", "").strip()
-
     if not alimento:
-        r = sorted(candidati, key=lambda x: x["id"], reverse=True)[0]
-        supabase.table("pasti").delete().eq("id", r["id"]).execute()
-        await update.message.reply_text(f"Ho cancellato: {r['descrizione']} ({r['kcal']} kcal)")
-        return
+        alimento = estrai_alimento(testo, intent)
 
     trovati = []
     for r in candidati:
@@ -376,12 +487,12 @@ async def reset_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ud["pending_add_ask_pasto"] = None
     ud["pending_timestamp"] = None
 
-    if alimento:
+    if alimento and update.message:
         await update.message.reply_text(
             f"Ho annullato la richiesta precedente perché non hai risposto.\n"
             f"Stavi aggiungendo: {alimento}"
         )
-    else:
+    elif update.message:
         await update.message.reply_text(
             "Ho annullato la richiesta precedente perché non hai risposto."
         )
@@ -506,6 +617,17 @@ async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------
+# INTENT FINALE (FALLBACK → AI)
+# ---------------------------------------------------------
+
+def get_intent(testo: str) -> dict:
+    fb = fallback_intent(testo)
+    if fb:
+        return fb
+    return classify_intent_ai(testo)
+
+
+# ---------------------------------------------------------
 # LOGICA PRINCIPALE
 # ---------------------------------------------------------
 
@@ -524,19 +646,21 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ud.get("pending_add") or ud.get("pending_add_ask_pasto"):
         await reset_pending(update, context)
 
-    intent = classify_intent(testo)
+    intent = get_intent(testo)
     now = datetime.now()
 
+    # ----------------- AGGIUNGI -----------------
     if intent["intento"] == "aggiungi":
-        alimento = intent.get("alimento", testo).strip()
+        alimento = estrai_alimento(testo, intent)
         pasto_txt = riconosci_pasto_da_testo(testo)
 
-        if intent.get("data") == "ieri":
+        t = testo.lower()
+        if "ieri" in t:
             d = date.today() - timedelta(days=1)
-        elif intent.get("data") == "oggi" or not intent.get("data"):
+        elif "oggi" in t:
             d = date.today()
         else:
-            d = parse_natural_date(intent.get("testo_data", testo))
+            d = date.today()
 
         if pasto_txt != "non_specificato":
             kcal = stima_calorie(alimento)
@@ -581,56 +705,66 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ----------------- CANCELLA -----------------
     if intent["intento"] == "cancella":
         await cancella_ai(update, testo, intent)
         return
 
+    # ----------------- RIEPILOGO PASTO -----------------
     if intent["intento"] == "riepilogo_pasto":
-        pasto = intent.get("pasto", "pranzo")
-        if intent.get("data") == "ieri":
+        pasto = intent.get("pasto") or riconosci_pasto_da_testo(testo) or "pranzo"
+        t = testo.lower()
+        if "ieri" in t:
             d = date.today() - timedelta(days=1)
-        elif intent.get("data") == "oggi" or not intent.get("data"):
+        elif "oggi" in t:
             d = date.today()
         else:
-            d = parse_natural_date(intent.get("testo_data", testo))
+            d = parse_natural_date(testo)
         msg = format_riepilogo_pasto(d, pasto)
         await update.message.reply_text(msg)
         return
 
+    # ----------------- RIEPILOGO GIORNO -----------------
     if intent["intento"] == "riepilogo_giorno":
-        if intent.get("data") == "ieri":
+        t = testo.lower()
+        if "ieri" in t:
             d = date.today() - timedelta(days=1)
-        elif intent.get("data") == "oggi" or not intent.get("data"):
+        elif "oggi" in t:
             d = date.today()
         else:
-            d = parse_natural_date(intent.get("testo_data", testo))
+            d = parse_natural_date(testo)
         msg = format_riepilogo_giorno(d)
         await update.message.reply_text(msg)
         return
 
+    # ----------------- SOMMA GIORNO -----------------
     if intent["intento"] == "somma_giorno":
-        if intent.get("data") == "ieri":
+        t = testo.lower()
+        if "ieri" in t:
             d = date.today() - timedelta(days=1)
-        elif intent.get("data") == "oggi" or not intent.get("data"):
+        elif "oggi" in t:
             d = date.today()
         else:
-            d = parse_natural_date(intent.get("testo_data", testo))
+            d = parse_natural_date(testo)
         tot = somma_calorie_giorno(d)
         await update.message.reply_text(f"Totale giornaliero: {tot} kcal")
         return
 
+    # ----------------- SOMMA PASTO -----------------
     if intent["intento"] == "somma_pasto":
-        pasto = intent.get("pasto", "pranzo")
-        if intent.get("data") == "ieri":
+        pasto = intent.get("pasto") or riconosci_pasto_da_testo(testo) or "pranzo"
+        t = testo.lower()
+        if "ieri" in t:
             d = date.today() - timedelta(days=1)
-        elif intent.get("data") == "oggi" or not intent.get("data"):
+        elif "oggi" in t:
             d = date.today()
         else:
-            d = parse_natural_date(intent.get("testo_data", testo))
+            d = parse_natural_date(testo)
         tot = somma_calorie_pasto(d, pasto)
         await update.message.reply_text(f"Totale {pasto}: {tot} kcal")
         return
 
+    # ----------------- NON CHIARO -----------------
     await update.message.reply_text(
         "Non ho capito bene cosa vuoi fare. Puoi dirmi cosa hai mangiato o chiedermi un riepilogo."
     )
