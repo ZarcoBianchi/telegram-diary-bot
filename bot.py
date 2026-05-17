@@ -619,17 +619,8 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 kcal = ai_kcal_totali(alimento)
 
             # Descrizione per Supabase
-            if quantita:
-                if quantita["tipo"] == "grammi":
-                    descrizione = f"{int(quantita['valore'])}g di {alimento}"
-                elif quantita["tipo"] == "ml":
-                    descrizione = f"{int(quantita['valore'])}ml di {alimento}"
-                elif quantita["tipo"] == "pezzi":
-                    descrizione = f"{int(quantita['valore'])} {quantita.get('unita','pezzi')} di {alimento}"
-                elif quantita["tipo"] == "porzione":
-                    descrizione = f"{quantita['valore']} porzione di {alimento}"
-                else:
-                    descrizione = alimento
+            if quantita_str:
+                descrizione = f"{quantita_str} {alimento}"
             else:
                 descrizione = alimento
 
