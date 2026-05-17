@@ -528,20 +528,17 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Mostra cosa hai detto (debug)
     await update.message.reply_text(f"🎤 Hai detto:\n{testo}")
 
-    # Normalizza leggermente
-    testo_norm = testo.lower().strip()
+    # Normalizza
+    testo_norm = testo.lower().strip().replace(".", "")
 
-    # --- QUI LA MAGIA ---
-    # Passiamo il testo trascritto direttamente alla AI
-    intent = ai_parse_intent(testo_norm)
+    # Salviamo il testo trascritto per log_food()
+    context.user_data["voice_text"] = testo_norm
 
-    # Ora eseguiamo la stessa logica di log_food(),
-    # ma usando il testo trascritto invece di update.message.text
-    fake_update = update
-    fake_update.message.text = testo_norm  # NON viene usato da Telegram, ma solo da noi
+    # Ora chiamiamo log_food normalmente
+    await log_food(update, context)
 
-    await log_food(fake_update, context)
-
+    # Puliamo dopo l'uso
+    context.user_data["voice_text"] = None
 
 
 # ---------------------------------------------------------
@@ -554,7 +551,7 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Non sei autorizzato a usare questo bot.")
         return
 
-    testo = update.message.text.strip()
+    testo = context.user_data.get("voice_text") or update.message.text.strip()
     ud = context.user_data
 
     if check_pending_timeout(context):
