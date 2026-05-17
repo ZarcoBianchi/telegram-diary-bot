@@ -100,23 +100,17 @@ def date_to_iso(d: date) -> str:
 
 def ai_parse_intent(testo: str) -> dict:
     """
-    L’AI deve restituire SOLO un JSON, senza testo attorno, nel formato:
-
-    {
-      "intento": "...",
-      "pasto": "...",
-      "data": "...",
-      "alimenti": [
-        { "alimento": "...", "quantita": "..." },
-        ...
-      ]
-    }
+    Parsing AI avanzato con 'parsing libero intelligente':
+    - NON dividere alimenti composti (es. 'crepes con la nutella')
+    - Dividere solo alimenti realmente distinti
+    - Riconoscere quantità
+    - Restituire JSON pulito
     """
 
     prompt = f"""
 Sei un parser di comandi per un diario alimentare.
 
-Devi analizzare il seguente messaggio dell'utente e restituire SOLO un JSON valido (senza testo prima o dopo), con questa struttura esatta:
+Il tuo compito è analizzare il messaggio dell'utente e restituire SOLO un JSON valido (senza testo prima o dopo), con questa struttura:
 
 {{
   "intento": "aggiungi | chiedi_calorie | riepilogo_giorno | riepilogo_pasto | somma_giorno | somma_pasto | cancella | altro",
@@ -130,11 +124,34 @@ Devi analizzare il seguente messaggio dell'utente e restituire SOLO un JSON vali
   ]
 }}
 
-Regole:
-- Se l'utente elenca più alimenti, dividili in elementi separati.
-- Se la quantità è presente (es. "3 crepes", "200ml", "2 biscotti"), mettila nel campo "quantita".
-- Se non c'è quantità, lascia "quantita": null.
-- Se non ci sono alimenti (es. domande, riepiloghi), "alimenti" deve essere una lista vuota [].
+### REGOLE DI PARSING (IMPORTANTISSIME)
+
+1. **NON dividere mai un alimento composto.**
+   Esempi:
+   - "crepes con la nutella"
+   - "pane e marmellata"
+   - "pasta al pesto"
+   - "riso con pollo e verdure"
+   - "yogurt con cereali"
+   - "biscotti al cioccolato"
+   - "fette biscottate con marmellata"
+
+2. **Dividi gli alimenti solo quando sono chiaramente separati.**
+   Esempi:
+   - "3 crepes con la nutella e un cappuccino" → 2 alimenti
+   - "un panino con prosciutto e una coca cola" → 2 alimenti
+   - "pasta al pesto, insalata e una mela" → 3 alimenti
+
+3. **NON dividere mai ingredienti interni.**
+   Esempi:
+   - "crepes con la nutella" NON diventa ["crepes", "nutella"]
+   - "pane e marmellata" NON diventa ["pane", "marmellata"]
+
+4. **Quantità**
+   - Se c'è un numero prima dell'alimento, mettilo in "quantita".
+   - Se non c'è quantità, lascia "quantita": null.
+
+5. **Se non ci sono alimenti (es. domande, riepiloghi), restituisci "alimenti": [].**
 
 Messaggio utente:
 "{testo}"
@@ -149,9 +166,11 @@ Rispondi SOLO con il JSON, senza alcun testo aggiuntivo.
         )
         raw = response.choices[0].message.content.strip()
 
+        # Prova JSON diretto
         try:
             return json.loads(raw)
         except:
+            # Prova a estrarre JSON con regex
             m = re.search(r"\{.*\}", raw, re.DOTALL)
             if m:
                 return json.loads(m.group(0))
