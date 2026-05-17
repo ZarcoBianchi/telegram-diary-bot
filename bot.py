@@ -201,24 +201,94 @@ def fallback_intent(testo: str) -> dict | None:
         return {"intento": "riepilogo_giorno", "data": data, "testo_data": testo}
 
     # aggiungi
-    if any(k in t for k in ["ho mangiato", "per pranzo ho", "per cena ho", "per colazione ho", "ho bevuto"]):
+    if any(k in t for k in ["ho mangiato", "per pranzo ho", "per cena ho", "per colazione ho", "ho bevuto", "aggiungi"]):
         return {"intento": "aggiungi"}
 
     return None
 
 
 # ---------------------------------------------------------
-# AI: MATCH PER CANCELLAZIONE
+# ESTRAZIONE QUANTITÀ
 # ---------------------------------------------------------
 
-def ai_match_cancel(comando: str, descrizione: str) -> bool:
+def estrai_quantita(testo: str):
+    t = testo.lower()
+
+    # grammi
+    m = re.search(r"(\d+)\s*(g|grammi|grammo)", t)
+    if m:
+        return {"tipo": "grammi", "valore": float(m.group(1))}
+
+    # ml / cl / litri
+    m = re.search(r"(\d+)\s*(ml|millilitri|cl|l|litri)", t)
+    if m:
+        val = float(m.group(1))
+        unit = m.group(2)
+        if unit == "cl":
+            val *= 10
+        if unit in ["l", "litri"]:
+            val *= 1000
+        return {"tipo": "ml", "valore": val}
+
+    # pezzi generici
+    m = re.search(r"(\d+)\s*(pezzi|biscotti|uova|fette)", t)
+    if m:
+        return {"tipo": "pezzi", "valore": float(m.group(1)), "unita": m.group(2)}
+
+    # cucchiaio
+    if "cucchiaio" in t:
+        return {"tipo": "grammi", "valore": 15}
+
+    # cucchiaino
+    if "cucchiaino" in t:
+        return {"tipo": "grammi", "valore": 5}
+
+    # bicchiere
+    if "mezzo bicchiere" in t:
+        return {"tipo": "ml", "valore": 75}
+    if "bicchiere" in t:
+        return {"tipo": "ml", "valore": 150}
+
+    # porzione
+    if "mezza porzione" in t:
+        return {"tipo": "porzione", "valore": 0.5}
+    if "porzione" in t:
+        return {"tipo": "porzione", "valore": 1}
+
+    return None
+
+
+# ---------------------------------------------------------
+# ESTRAZIONE ALIMENTO (REGEX → AI)
+# ---------------------------------------------------------
+
+def estrai_alimento_regex(testo: str) -> str | None:
+    t = testo.lower()
+
+    patterns = [
+        r"ho mangiato (.+)",
+        r"per pranzo ho (.+)",
+        r"per cena ho (.+)",
+        r"per colazione ho (.+)",
+        r"ho bevuto (.+)",
+        r"aggiungi (.+)",
+    ]
+
+    for p in patterns:
+        m = re.search(p, t)
+        if m:
+            return m.group(1).strip()
+
+    return None
+
+
+def estrai_alimento_ai(testo: str) -> str | None:
     prompt = f"""
-L’utente vuole cancellare qualcosa dal diario alimentare.
+Dal seguente messaggio estrai SOLO il nome dell'alimento o bevanda consumata.
 
-Comando: "{comando}"
-Riga: "{descrizione}"
+Messaggio: "{testo}"
 
-Rispondi SOLO con "SI" o "NO".
+Rispondi SOLO con il nome dell'alimento, senza altre parole.
 """
 
     try:
@@ -226,17 +296,136 @@ Rispondi SOLO con "SI" o "NO".
             model=MODEL_NAME,
             messages=[{"role": "user", "content": prompt}],
         )
-        testo = response.choices[0].message.content.strip().upper()
-        return "SI" in testo
+        return response.choices[0].message.content.strip()
     except:
-        return False
+        return None
+
+
+def estrai_alimento(testo: str, intent: dict) -> str:
+    if intent.get("alimento"):
+        return intent["alimento"].strip()
+
+    a = estrai_alimento_regex(testo)
+    if a:
+        return a
+
+    a = estrai_alimento_ai(testo)
+    if a:
+        return a
+
+    return testo.strip()
 
 
 # ---------------------------------------------------------
-# STIMA CALORIE
+# SUPABASE: FOODS (TABELLA DINAMICA)
 # ---------------------------------------------------------
 
-def stima_calorie(cibo: str) -> int:
+def cerca_alimento_foods(nome: str):
+    nome = nome.lower().strip()
+    res = supabase.table("foods").select("*").eq("name", nome).execute()
+    if res.data:
+        return res.data[0]
+    return None
+
+
+def salva_alimento_foods(nome: str, kcal_100g=None, kcal_100ml=None, kcal_unit=None, grams_unit=None, ml_unit=None, source="AI"):
+    nome = nome.lower().strip()
+    supabase.table("foods").insert({
+        "name": nome,
+        "kcal_per_100g": int(kcal_100g) if kcal_100g is not None else None,
+        "kcal_per_100ml": int(kcal_100ml) if kcal_100ml is not None else None,
+        "kcal_per_unit": int(kcal_unit) if kcal_unit is not None else None,
+        "grams_per_unit": grams_unit,
+        "ml_per_unit": ml_unit,
+        "source": source,
+    }).execute()
+
+
+def aggiorna_alimento_foods(nome: str, kcal_100g=None, kcal_100ml=None, kcal_unit=None, grams_unit=None, ml_unit=None, source="user"):
+    nome = nome.lower().strip()
+    supabase.table("foods").update({
+        "kcal_per_100g": int(kcal_100g) if kcal_100g is not None else None,
+        "kcal_per_100ml": int(kcal_100ml) if kcal_100ml is not None else None,
+        "kcal_per_unit": int(kcal_unit) if kcal_unit is not None else None,
+        "grams_per_unit": grams_unit,
+        "ml_per_unit": ml_unit,
+        "source": source,
+    }).eq("name", nome).execute()
+
+
+# ---------------------------------------------------------
+# AI: STIMA VALORI NUTRIZIONALI PER ALIMENTO NUOVO
+# ---------------------------------------------------------
+
+def ai_stima_kcal(alimento: str):
+    prompt = f"""
+Stima i valori nutrizionali del seguente alimento:
+
+"{alimento}"
+
+Rispondi SOLO con un JSON nel formato:
+
+{{
+  "kcal_per_100g": ...,
+  "kcal_per_100ml": ...,
+  "kcal_per_unit": ...,
+  "grams_per_unit": ...,
+  "ml_per_unit": ...
+}}
+
+Metti null per i campi non applicabili.
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = response.choices[0].message.content.strip()
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not match:
+            return None
+        data = json.loads(match.group(0))
+        return {
+            "kcal_per_100g": data.get("kcal_per_100g"),
+            "kcal_per_100ml": data.get("kcal_per_100ml"),
+            "kcal_per_unit": data.get("kcal_per_unit"),
+            "grams_per_unit": data.get("grams_per_unit"),
+            "ml_per_unit": data.get("ml_per_unit"),
+        }
+    except:
+        return None
+
+
+# ---------------------------------------------------------
+# CALCOLO CALORIE (AI + FALLBACK MATEMATICO)
+# ---------------------------------------------------------
+
+def calcola_kcal(alimento_info, quantita):
+    tipo = quantita["tipo"]
+    val = quantita["valore"]
+
+    # 1) grammi
+    if tipo == "grammi" and alimento_info.get("kcal_per_100g"):
+        return int((alimento_info["kcal_per_100g"] * val) / 100)
+
+    # 2) ml
+    if tipo == "ml" and alimento_info.get("kcal_per_100ml"):
+        return int((alimento_info["kcal_per_100ml"] * val) / 100)
+
+    # 3) pezzi / porzione
+    if tipo in ["pezzi", "porzione"] and alimento_info.get("kcal_per_unit"):
+        return int(alimento_info["kcal_per_unit"] * val)
+
+    # fallback generico
+    return 200
+
+
+# ---------------------------------------------------------
+# STIMA CALORIE SENZA QUANTITÀ (BACKUP)
+# ---------------------------------------------------------
+
+def stima_calorie_senza_quantita(cibo: str) -> int:
     prompt = f"""
 Stima le calorie totali del seguente alimento:
 
@@ -286,64 +475,7 @@ def suggerisci_pasto_da_orario(now: datetime) -> str:
 
 
 # ---------------------------------------------------------
-# ESTRAZIONE ALIMENTO (REGEX → AI)
-# ---------------------------------------------------------
-
-def estrai_alimento_regex(testo: str) -> str | None:
-    t = testo.lower()
-
-    patterns = [
-        r"ho mangiato (.+)",
-        r"per pranzo ho (.+)",
-        r"per cena ho (.+)",
-        r"per colazione ho (.+)",
-        r"ho bevuto (.+)",
-    ]
-
-    for p in patterns:
-        m = re.search(p, t)
-        if m:
-            return m.group(1).strip()
-
-    return None
-
-
-def estrai_alimento_ai(testo: str) -> str | None:
-    prompt = f"""
-Dal seguente messaggio estrai SOLO il nome dell'alimento o bevanda consumata.
-
-Messaggio: "{testo}"
-
-Rispondi SOLO con il nome dell'alimento, senza altre parole.
-"""
-
-    try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return response.choices[0].message.content.strip()
-    except:
-        return None
-
-
-def estrai_alimento(testo: str, intent: dict) -> str:
-    if intent.get("alimento"):
-        return intent["alimento"].strip()
-
-    a = estrai_alimento_regex(testo)
-    if a:
-        return a
-
-    a = estrai_alimento_ai(testo)
-    if a:
-        return a
-
-    return testo.strip()
-
-
-# ---------------------------------------------------------
-# SUPABASE
+# SUPABASE: PASTI
 # ---------------------------------------------------------
 
 def salva_pasto(pasto: str, descrizione: str, kcal: int, d: date):
@@ -412,6 +544,27 @@ def format_riepilogo_giorno(d: date) -> str:
 # CANCELLAZIONE AI
 # ---------------------------------------------------------
 
+def ai_match_cancel(comando: str, descrizione: str) -> bool:
+    prompt = f"""
+L’utente vuole cancellare qualcosa dal diario alimentare.
+
+Comando: "{comando}"
+Riga: "{descrizione}"
+
+Rispondi SOLO con "SI" o "NO".
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        testo = response.choices[0].message.content.strip().upper()
+        return "SI" in testo
+    except:
+        return False
+
+
 async def cancella_ai(update: Update, testo: str, intent: dict):
     t = testo.lower()
 
@@ -465,34 +618,20 @@ async def cancella_ai(update: Update, testo: str, intent: dict):
 
 def check_pending_timeout(context: ContextTypes.DEFAULT_TYPE):
     ud = context.user_data
-    if "pending_timestamp" not in ud or not ud["pending_timestamp"]:
+    ts = ud.get("pending_timestamp")
+    if not ts:
         return False
-
-    if time.time() - ud["pending_timestamp"] > PENDING_TIMEOUT:
-        return True
-
-    return False
+    return (time.time() - ts) > PENDING_TIMEOUT
 
 
 async def reset_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ud = context.user_data
-
-    alimento = None
-    if ud.get("pending_add"):
-        alimento = ud["pending_add"].get("alimento")
-    if ud.get("pending_add_ask_pasto"):
-        alimento = ud["pending_add_ask_pasto"].get("alimento")
-
     ud["pending_add"] = None
     ud["pending_add_ask_pasto"] = None
+    ud["pending_new_food"] = None
+    ud["awaiting_manual_kcal_for_food"] = None
     ud["pending_timestamp"] = None
-
-    if alimento and update.message:
-        await update.message.reply_text(
-            f"Ho annullato la richiesta precedente perché non hai risposto.\n"
-            f"Stavi aggiungendo: {alimento}"
-        )
-    elif update.message:
+    if update.message:
         await update.message.reply_text(
             "Ho annullato la richiesta precedente perché non hai risposto."
         )
@@ -511,11 +650,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if check_pending_timeout(context):
         await query.edit_message_text("Richiesta scaduta.")
-        ud["pending_add"] = None
-        ud["pending_add_ask_pasto"] = None
-        ud["pending_timestamp"] = None
+        await reset_pending(update, context)
         return
 
+    # cancellazione
     if data.startswith("del_"):
         id_da_cancellare = int(data.replace("del_", ""))
         res = supabase.table("pasti").select("*").eq("id", id_da_cancellare).execute()
@@ -527,6 +665,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"Ho cancellato: {r['descrizione']} ({r['kcal']} kcal)")
         return
 
+    # conferma pasto suggerito
     if data == "add_confirm_yes":
         pending = ud.get("pending_add")
         if not pending:
@@ -535,11 +674,26 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         alimento = pending["alimento"]
         pasto = pending["pasto_suggerito"]
         d = pending["data"]
-        kcal = stima_calorie(alimento)
-        salva_pasto(pasto, alimento, kcal, d)
+        quantita = pending.get("quantita")
+        descrizione = pending["descrizione"]
+
+        # calcolo kcal usando foods se possibile
+        info = cerca_alimento_foods(alimento)
+        if quantita and info:
+            kcal = calcola_kcal(info, quantita)
+        elif info and not quantita:
+            # se non c'è quantita ma abbiamo kcal_per_unit
+            if info.get("kcal_per_unit"):
+                kcal = int(info["kcal_per_unit"])
+            else:
+                kcal = stima_calorie_senza_quantita(descrizione)
+        else:
+            kcal = stima_calorie_senza_quantita(descrizione)
+
+        salva_pasto(pasto, descrizione, kcal, d)
         ud["pending_add"] = None
         ud["pending_timestamp"] = None
-        await query.edit_message_text(f"Registrato {pasto}: {alimento} ({kcal} kcal)")
+        await query.edit_message_text(f"Registrato {pasto}: {descrizione} ({kcal} kcal)")
         return
 
     if data == "add_confirm_no":
@@ -549,9 +703,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         alimento = pending["alimento"]
         d = pending["data"]
+        quantita = pending.get("quantita")
+        descrizione = pending["descrizione"]
 
         ud["pending_add"] = None
-        ud["pending_add_ask_pasto"] = {"alimento": alimento, "data": d}
+        ud["pending_add_ask_pasto"] = {
+            "alimento": alimento,
+            "data": d,
+            "quantita": quantita,
+            "descrizione": descrizione,
+        }
         ud["pending_timestamp"] = time.time()
 
         keyboard = [
@@ -562,7 +723,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
         await query.edit_message_text(
-            f"Ok, per quale pasto hai mangiato {alimento}?",
+            f"Ok, per quale pasto hai mangiato {descrizione}?",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return
@@ -575,6 +736,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         alimento = pending["alimento"]
         d = pending["data"]
+        quantita = pending.get("quantita")
+        descrizione = pending["descrizione"]
 
         if data == "add_set_colazione":
             pasto = "colazione"
@@ -583,13 +746,80 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             pasto = "cena"
 
-        kcal = stima_calorie(alimento)
-        salva_pasto(pasto, alimento, kcal, d)
+        info = cerca_alimento_foods(alimento)
+        if quantita and info:
+            kcal = calcola_kcal(info, quantita)
+        elif info and not quantita:
+            if info.get("kcal_per_unit"):
+                kcal = int(info["kcal_per_unit"])
+            else:
+                kcal = stima_calorie_senza_quantita(descrizione)
+        else:
+            kcal = stima_calorie_senza_quantita(descrizione)
+
+        salva_pasto(pasto, descrizione, kcal, d)
 
         ud["pending_add_ask_pasto"] = None
         ud["pending_timestamp"] = None
 
-        await query.edit_message_text(f"Registrato {pasto}: {alimento} ({kcal} kcal)")
+        await query.edit_message_text(f"Registrato {pasto}: {descrizione} ({kcal} kcal)")
+        return
+
+    # conferma nuovo alimento (foods)
+    if data == "food_confirm_yes":
+        pending_food = ud.get("pending_new_food")
+        if not pending_food:
+            await query.edit_message_text("Nessun alimento in attesa.")
+            return
+
+        alimento = pending_food["alimento"]
+        info_ai = pending_food["info_ai"]
+        quantita = pending_food["quantita"]
+        pasto = pending_food["pasto"]
+        d = pending_food["data"]
+        descrizione = pending_food["descrizione"]
+
+        salva_alimento_foods(
+            alimento,
+            kcal_100g=info_ai.get("kcal_per_100g"),
+            kcal_100ml=info_ai.get("kcal_per_100ml"),
+            kcal_unit=info_ai.get("kcal_per_unit"),
+            grams_unit=info_ai.get("grams_per_unit"),
+            ml_unit=info_ai.get("ml_per_unit"),
+            source="AI",
+        )
+
+        info = cerca_alimento_foods(alimento)
+        if quantita and info:
+            kcal = calcola_kcal(info, quantita)
+        else:
+            kcal = stima_calorie_senza_quantita(descrizione)
+
+        salva_pasto(pasto, descrizione, kcal, d)
+
+        ud["pending_new_food"] = None
+        ud["pending_timestamp"] = None
+
+        await query.edit_message_text(
+            f"Ho salvato “{alimento}” in foods e registrato {pasto}: {descrizione} ({kcal} kcal)"
+        )
+        return
+
+    if data == "food_confirm_no":
+        pending_food = ud.get("pending_new_food")
+        if not pending_food:
+            await query.edit_message_text("Nessun alimento in attesa.")
+            return
+
+        alimento = pending_food["alimento"]
+        ud["awaiting_manual_kcal_for_food"] = pending_food
+        ud["pending_new_food"] = None
+        ud["pending_timestamp"] = time.time()
+
+        await query.edit_message_text(
+            f"Ok, dimmi tu quante kcal per 100g ha “{alimento}”.\n"
+            f"Rispondi solo con un numero intero (es: 550)."
+        )
         return
 
 
@@ -640,10 +870,53 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
     testo = update.message.text.strip()
     ud = context.user_data
 
+    # timeout pending
     if check_pending_timeout(context):
         await reset_pending(update, context)
 
-    if ud.get("pending_add") or ud.get("pending_add_ask_pasto"):
+    # gestione risposta manuale kcal per nuovo alimento
+    if ud.get("awaiting_manual_kcal_for_food"):
+        pending_food = ud["awaiting_manual_kcal_for_food"]
+        try:
+            kcal_100g = int(re.search(r"\d+", testo).group(0))
+        except:
+            await update.message.reply_text("Non ho capito il numero. Scrivi solo le kcal per 100g, es: 550.")
+            return
+
+        alimento = pending_food["alimento"]
+        quantita = pending_food["quantita"]
+        pasto = pending_food["pasto"]
+        d = pending_food["data"]
+        descrizione = pending_food["descrizione"]
+
+        salva_alimento_foods(
+            alimento,
+            kcal_100g=kcal_100g,
+            kcal_100ml=None,
+            kcal_unit=None,
+            grams_unit=None,
+            ml_unit=None,
+            source="user",
+        )
+
+        info = cerca_alimento_foods(alimento)
+        if quantita and info:
+            kcal = calcola_kcal(info, quantita)
+        else:
+            kcal = stima_calorie_senza_quantita(descrizione)
+
+        salva_pasto(pasto, descrizione, kcal, d)
+
+        ud["awaiting_manual_kcal_for_food"] = None
+        ud["pending_timestamp"] = None
+
+        await update.message.reply_text(
+            f"Perfetto, ho salvato “{alimento}” con {kcal_100g} kcal/100g e registrato {pasto}: {descrizione} ({kcal} kcal)"
+        )
+        return
+
+    # se c'era un pending_add o simili ma l'utente scrive altro → reset
+    if ud.get("pending_add") or ud.get("pending_add_ask_pasto") or ud.get("pending_new_food"):
         await reset_pending(update, context)
 
     intent = get_intent(testo)
@@ -652,8 +925,9 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ----------------- AGGIUNGI -----------------
     if intent["intento"] == "aggiungi":
         alimento = estrai_alimento(testo, intent)
-        pasto_txt = riconosci_pasto_da_testo(testo)
+        quantita = estrai_quantita(testo)
 
+        pasto_txt = riconosci_pasto_da_testo(testo)
         t = testo.lower()
         if "ieri" in t:
             d = date.today() - timedelta(days=1)
@@ -662,17 +936,86 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             d = date.today()
 
+        # descrizione da salvare (con quantità se presente)
+        if quantita:
+            if quantita["tipo"] == "grammi":
+                descrizione = f"{int(quantita['valore'])}g di {alimento}"
+            elif quantita["tipo"] == "ml":
+                descrizione = f"{int(quantita['valore'])}ml di {alimento}"
+            elif quantita["tipo"] == "pezzi":
+                descrizione = f"{int(quantita['valore'])} {quantita.get('unita','pezzi')} di {alimento}"
+            elif quantita["tipo"] == "porzione":
+                descrizione = f"{quantita['valore']} porzione di {alimento}"
+            else:
+                descrizione = alimento
+        else:
+            descrizione = alimento
+
+        # se il pasto è chiaro
         if pasto_txt != "non_specificato":
-            kcal = stima_calorie(alimento)
-            salva_pasto(pasto_txt, alimento, kcal, d)
+            info = cerca_alimento_foods(alimento)
+            if quantita and info:
+                kcal = calcola_kcal(info, quantita)
+            elif info and not quantita:
+                if info.get("kcal_per_unit"):
+                    kcal = int(info["kcal_per_unit"])
+                else:
+                    kcal = stima_calorie_senza_quantita(descrizione)
+            else:
+                # alimento non presente in foods → AI + conferma
+                info_ai = ai_stima_kcal(alimento)
+                if info_ai:
+                    ud["pending_new_food"] = {
+                        "alimento": alimento,
+                        "info_ai": info_ai,
+                        "quantita": quantita,
+                        "pasto": pasto_txt,
+                        "data": d,
+                        "descrizione": descrizione,
+                    }
+                    ud["pending_timestamp"] = time.time()
+
+                    parts = []
+                    if info_ai.get("kcal_per_100g") is not None:
+                        parts.append(f"{info_ai['kcal_per_100g']} kcal/100g")
+                    if info_ai.get("kcal_per_100ml") is not None:
+                        parts.append(f"{info_ai['kcal_per_100ml']} kcal/100ml")
+                    if info_ai.get("kcal_per_unit") is not None:
+                        parts.append(f"{info_ai['kcal_per_unit']} kcal per unità")
+
+                    testo_ai = ", ".join(parts) if parts else "valori stimati"
+
+                    keyboard = [
+                        [
+                            InlineKeyboardButton("Sì", callback_data="food_confirm_yes"),
+                            InlineKeyboardButton("No", callback_data="food_confirm_no"),
+                        ]
+                    ]
+                    await update.message.reply_text(
+                        f"Non conosco “{alimento}”.\n"
+                        f"Posso salvarlo con questi valori?\n"
+                        f"{testo_ai}",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                    return
+                else:
+                    kcal = stima_calorie_senza_quantita(descrizione)
+
+            salva_pasto(pasto_txt, descrizione, kcal, d)
             await update.message.reply_text(
-                f"Registrato {pasto_txt}: {alimento} ({kcal} kcal)"
+                f"Registrato {pasto_txt}: {descrizione} ({kcal} kcal)"
             )
             return
 
+        # pasto non chiaro → chiedi conferma pasto
         pasto_suggerito = suggerisci_pasto_da_orario(now)
         if pasto_suggerito == "non_specificato":
-            ud["pending_add_ask_pasto"] = {"alimento": alimento, "data": d}
+            ud["pending_add_ask_pasto"] = {
+                "alimento": alimento,
+                "data": d,
+                "quantita": quantita,
+                "descrizione": descrizione,
+            }
             ud["pending_timestamp"] = time.time()
             keyboard = [
                 [
@@ -682,7 +1025,7 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]
             ]
             await update.message.reply_text(
-                f"Per quale pasto hai mangiato {alimento}?",
+                f"Per quale pasto hai mangiato {descrizione}?",
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
             return
@@ -691,6 +1034,8 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "alimento": alimento,
             "pasto_suggerito": pasto_suggerito,
             "data": d,
+            "quantita": quantita,
+            "descrizione": descrizione,
         }
         ud["pending_timestamp"] = time.time()
         keyboard = [
@@ -700,7 +1045,7 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
         await update.message.reply_text(
-            f"Hai mangiato {alimento} per {pasto_suggerito}?",
+            f"Hai mangiato {descrizione} per {pasto_suggerito}?",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return
