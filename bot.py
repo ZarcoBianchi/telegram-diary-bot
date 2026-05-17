@@ -1,16 +1,12 @@
 import os
-import re
 import json
-import time
-from datetime import datetime, date, timedelta
-from dateutil import parser as dateparser
+import re
+from datetime import datetime, timedelta
 
-from groq import Groq
-from supabase import create_client
 from telegram import (
     Update,
     InlineKeyboardButton,
-    InlineKeyboardMarkup,
+    InlineKeyboardMarkup
 )
 from telegram.ext import (
     ApplicationBuilder,
@@ -18,85 +14,42 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     ContextTypes,
-    filters,
+    filters
 )
 
-# Whisper
+from supabase import create_client
 from faster_whisper import WhisperModel
 from pydub import AudioSegment
 
-# ---------------------------------------------------------
+# -----------------------------
 # CONFIGURAZIONE
-# ---------------------------------------------------------
+# -----------------------------
 
-TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-client = Groq(api_key=GROQ_API_KEY)
+MODEL_NAME = "llama3-8b-8192"
+from groq import Groq
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-MODEL_NAME = "llama-3.3-70b-versatile"
+# -----------------------------
+# WHISPER
+# -----------------------------
 
-ALLOWED_USER_ID = 1042036959
-PENDING_TIMEOUT = 10
+whisper_model = WhisperModel("small", device="cpu")
 
-# Whisper model
-whisper_model = WhisperModel("small", device="cpu", compute_type="int8")
+def trascrivi_audio(percorso):
+    segments, info = whisper_model.transcribe(percorso, beam_size=5)
+    testo = " ".join([seg.text for seg in segments])
+    return testo.strip()
 
-
-# ---------------------------------------------------------
-# UTILS: DATE NATURALI
-# ---------------------------------------------------------
-
-def parse_natural_date(testo: str) -> date:
-    testo = testo.lower()
-    oggi = date.today()
-
-    if "oggi" in testo:
-        return oggi
-    if "ieri" in testo:
-        return oggi - timedelta(days=1)
-    if "l'altro ieri" in testo or "l’altro ieri" in testo:
-        return oggi - timedelta(days=2)
-
-    giorni = {
-        "lunedì": 0, "lunedi": 0,
-        "martedì": 1, "martedi": 1,
-        "mercoledì": 2,
-        "giovedì": 3, "giovedi": 3,
-        "venerdì": 4, "venerdi": 4,
-        "sabato": 5,
-        "domenica": 6,
-    }
-
-    for g, idx in giorni.items():
-        if g in testo:
-            oggi_idx = oggi.weekday()
-            delta = oggi_idx - idx
-            if delta < 0:
-                delta += 7
-            return oggi - timedelta(days=delta)
-
-    try:
-        d = dateparser.parse(testo, dayfirst=True)
-        if d:
-            return d.date()
-    except:
-        pass
-
-    return oggi
-
-
-def date_to_iso(d: date) -> str:
-    return d.isoformat()
-
-
-# ---------------------------------------------------------
-# AI: INTENT + PARSING MULTI-ALIMENTO (VERSIONE MIGLIORATA)
-# ---------------------------------------------------------
+# -----------------------------
+# AI PARSER MIGLIORATO
+# -----------------------------
 
 def ai_parse_intent(testo: str) -> dict:
     prompt = f"""
@@ -118,32 +71,34 @@ Devi analizzare il messaggio dell'utente e restituire SOLO un JSON valido.
 
 ### REGOLE IMPORTANTI
 
-1. Se il messaggio contiene parole come:
-   - "oggi", "di oggi", "oggi?" → data = "oggi"
+1. Se il messaggio contiene:
+   - "oggi", "di oggi" → data = "oggi"
    - "ieri", "di ieri" → data = "ieri"
 
-2. Se il messaggio contiene:
+2. Se contiene:
    - "colazione" → pasto = "colazione"
    - "pranzo" → pasto = "pranzo"
    - "cena" → pasto = "cena"
 
-3. Se il messaggio contiene:
-   - "riepilogo", "recap", "resoconto", "mostrami" → intento = riepilogo_giorno o riepilogo_pasto
+3. Se contiene:
+   - "riepilogo", "recap", "resoconto", "mostrami"
      *Se NON è specificato un pasto → riepilogo_giorno*
      *Se è specificato un pasto → riepilogo_pasto*
 
-4. Se il messaggio contiene:
-   - "totale", "quante calorie oggi", "somma" → intento = somma_giorno o somma_pasto
+4. Se contiene:
+   - "totale", "quante calorie", "somma"
+     → somma_giorno o somma_pasto
 
-5. Se il messaggio contiene:
-   - "aggiungi", "metti", "registra", "ho mangiato" → intento = aggiungi
+5. Se contiene:
+   - "aggiungi", "metti", "registra", "ho mangiato"
+     → intento = aggiungi
 
-6. Se il messaggio contiene:
-   - "cancella", "rimuovi", "elimina" → intento = cancella
+6. Se contiene:
+   - "togli", "rimuovi", "elimina", "cancella"
+     → intento = cancella
+     → alimento = parola dopo il comando
 
-7. Se il messaggio NON contiene alimenti → "alimenti": []
-
-8. NON inventare alimenti. NON dividere alimenti composti.
+7. NON inventare alimenti.
 
 ### MESSAGGIO UTENTE
 "{testo}"
@@ -176,366 +131,246 @@ Rispondi SOLO con il JSON.
         "alimenti": []
     }
 
+# -----------------------------
+# UTILS
+# -----------------------------
 
-# ---------------------------------------------------------
-# PARSING QUANTITÀ
-# ---------------------------------------------------------
+def riconosci_data_da_intent(intent_data, testo):
+    oggi = datetime.now().strftime("%Y-%m-%d")
+    ieri = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-def parse_quantita_string(q: str | None):
-    if not q:
-        return None
-    t = q.lower().strip()
+    if intent_data == "oggi":
+        return oggi
+    if intent_data == "ieri":
+        return ieri
 
-    m = re.match(r"(\d+)\s*(g|grammi|grammo)", t)
-    if m:
-        return {"tipo": "grammi", "valore": float(m.group(1))}
+    if "oggi" in testo:
+        return oggi
+    if "ieri" in testo:
+        return ieri
 
-    m = re.match(r"(\d+)\s*(ml|millilitri|cl|l|litri)", t)
-    if m:
-        val = float(m.group(1))
-        unit = m.group(2)
-        if unit == "cl":
-            val *= 10
-        if unit in ["l", "litri"]:
-            val *= 1000
-        return {"tipo": "ml", "valore": val}
-
-    m = re.match(r"(\d+)\s*(pezzi|biscotti|uova|fette)", t)
-    if m:
-        return {"tipo": "pezzi", "valore": float(m.group(1)), "unita": m.group(2)}
-
-    if "cucchiaio" in t:
-        return {"tipo": "grammi", "valore": 15}
-    if "cucchiaino" in t:
-        return {"tipo": "grammi", "valore": 5}
-    if "bicchiere" in t:
-        return {"tipo": "ml", "valore": 150}
-
-    return None
-
-
-# ---------------------------------------------------------
-# WHISPER: TRASCRIZIONE AUDIO
-# ---------------------------------------------------------
-
-def trascrivi_audio(percorso):
-    audio = AudioSegment.from_file(percorso)
-    wav_path = percorso + ".wav"
-    audio.export(wav_path, format="wav")
-
-    segments, info = whisper_model.transcribe(wav_path, beam_size=1)
-    testo = "".join([seg.text for seg in segments]).strip()
-    return testo
+    return oggi
     
-    # ---------------------------------------------------------
-# AI: STIMA CALORIE
-# ---------------------------------------------------------
+    # -----------------------------
+# CALORIE (AI)
+# -----------------------------
 
-def ai_kcal_per_100(alimento: str, tipo_quantita: str) -> int:
-    if tipo_quantita == "grammi":
-        domanda = f"Quante kcal per 100g ha {alimento}? Rispondi solo con un numero."
-    else:
-        domanda = f"Quante kcal per 100ml ha {alimento}? Rispondi solo con un numero."
-
-    try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{"role": "user", "content": domanda}],
-        )
-        testo = response.choices[0].message.content.strip()
-        m = re.search(r"\d+", testo)
-        if m:
-            return int(m.group(0))
-        return 300
-    except:
-        return 300
-
-
-def ai_kcal_totali(alimento_o_descrizione: str) -> int:
-    domanda = f"Quante kcal totali ha {alimento_o_descrizione}? Rispondi solo con un numero."
-    try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{"role": "user", "content": domanda}],
-        )
-        testo = response.choices[0].message.content.strip()
-        m = re.search(r"\d+", testo)
-        if m:
-            return int(m.group(0))
-        return 300
-    except:
-        return 300
-
-
-def ai_risposta_calorie_testuale(testo: str) -> str:
+def ai_stima_calorie(alimento, quantita):
     prompt = f"""
-L'utente chiede informazioni sulle calorie di un alimento.
+Stima le calorie dell'alimento seguente.
 
-Domanda: "{testo}"
+Alimento: {alimento}
+Quantità: {quantita}
 
-Rispondi in italiano, in modo breve, indicando chiaramente:
-- il valore in kcal
-- l'unità di riferimento (100g, 100ml, porzione, ecc.)
-
-Esempi:
-- "Il cioccolato ha circa 575 kcal per 100g."
-- "Il latte intero ha circa 60 kcal per 100ml."
-- "Una fetta di torta ha circa 240 kcal."
-
-Rispondi con UNA sola frase.
+Rispondi SOLO con un numero intero, senza testo aggiuntivo.
 """
+
     try:
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[{"role": "user", "content": prompt}],
         )
-        return response.choices[0].message.content.strip()
+        raw = response.choices[0].message.content.strip()
+        raw = re.sub(r"[^\d]", "", raw)
+        return int(raw) if raw else 0
     except:
-        return "Direi circa 300 kcal, ma prendilo come una stima molto approssimativa."
+        return 0
 
+# -----------------------------
+# AGGIUNTA PASTI
+# -----------------------------
 
-# ---------------------------------------------------------
-# RICONOSCIMENTO PASTO E DATA
-# ---------------------------------------------------------
+async def aggiungi_ai(update: Update, testo: str, intent: dict):
+    pasto = intent.get("pasto")
+    data = riconosci_data_da_intent(intent.get("data"), testo)
 
-def riconosci_pasto_da_intent(intent_pasto: str | None, testo: str) -> str:
-    if intent_pasto in ["colazione", "pranzo", "cena"]:
-        return intent_pasto
+    if not pasto:
+        await update.message.reply_text("Non ho capito il pasto (colazione, pranzo, cena).")
+        return
 
-    t = testo.lower()
-    if "colazione" in t:
-        return "colazione"
-    if "pranzo" in t:
-        return "pranzo"
-    if "cena" in t:
-        return "cena"
+    alimenti = intent.get("alimenti", [])
+    if not alimenti:
+        await update.message.reply_text("Non ho capito cosa hai mangiato.")
+        return
 
-    h = datetime.now().hour
-    if 5 <= h < 11:
-        return "colazione"
-    if 11 <= h < 16:
-        return "pranzo"
-    if 16 <= h < 23:
-        return "cena"
+    totale_kcal = 0
+    righe = []
 
-    return "non_specificato"
+    for a in alimenti:
+        nome = a.get("alimento")
+        quantita = a.get("quantita") or ""
 
+        kcal = ai_stima_calorie(nome, quantita)
+        totale_kcal += kcal
 
-def riconosci_data_da_intent(intent_data: str | None, testo: str) -> date:
-    if intent_data == "oggi":
-        return date.today()
-    if intent_data == "ieri":
-        return date.today() - timedelta(days=1)
+        descr = f"{quantita} {nome}".strip()
+        righe.append(f"- {descr} ({kcal} kcal)")
 
-    t = testo.lower()
-    if "ieri" in t:
-        return date.today() - timedelta(days=1)
-    if "oggi" in t:
-        return date.today()
+        supabase.table("pasti").insert({
+            "data": data,
+            "pasto": pasto,
+            "descrizione": descr,
+            "kcal": kcal,
+            "ora": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }).execute()
 
-    return parse_natural_date(testo)
+    risposta = f"{pasto.capitalize()} di {data}:\n\n" + "\n".join(righe)
+    risposta += f"\nTotale: {totale_kcal} kcal"
 
+    await update.message.reply_text(risposta)
 
-# ---------------------------------------------------------
-# SUPABASE: PASTI
-# ---------------------------------------------------------
+# -----------------------------
+# RIEPILOGO GIORNO
+# -----------------------------
 
-def salva_pasto(pasto: str, descrizione: str, kcal: int, d: date):
-    dt = datetime.combine(d, datetime.now().time())
-    supabase.table("pasti").insert({
-        "ora": dt.isoformat(),
-        "pasto": pasto,
-        "descrizione": descrizione,
-        "kcal": kcal,
-    }).execute()
+async def riepilogo_giorno(update: Update, testo: str, intent: dict):
+    data = riconosci_data_da_intent(intent.get("data"), testo)
 
+    res = supabase.table("pasti").select("*").eq("data", data).execute()
+    pasti = res.data or []
 
-def get_pasti_by_date(d: date):
-    iso = date_to_iso(d)
-    res = supabase.table("pasti").select("*").execute()
-    return [r for r in res.data if r["ora"].startswith(iso)]
-
-
-def somma_calorie_giorno(d: date) -> int:
-    return sum(r["kcal"] for r in get_pasti_by_date(d))
-
-
-def somma_calorie_pasto(d: date, pasto: str) -> int:
-    return sum(r["kcal"] for r in get_pasti_by_date(d) if r["pasto"] == pasto)
-
-
-def format_riepilogo_pasto(d: date, pasto: str) -> str:
-    pasti = [r for r in get_pasti_by_date(d) if r["pasto"] == pasto]
     if not pasti:
-        return f"Nessun {pasto} trovato per {d.isoformat()}."
+        await update.message.reply_text(f"Nessun pasto registrato per {data}.")
+        return
 
-    lines = [f"{pasto.capitalize()} di {d.isoformat()}:"]
-    tot = 0
+    risposta = f"Riepilogo del {data}:\n\n"
+    totale = 0
+
     for r in pasti:
-        lines.append(f"- {r['descrizione']} ({r['kcal']} kcal)")
-        tot += r["kcal"]
-    lines.append("")
-    lines.append(f"Totale: {tot} kcal")
-    return "\n".join(lines)
+        risposta += f"- {r['pasto']}: {r['descrizione']} ({r['kcal']} kcal)\n"
+        totale += r["kcal"]
 
+    risposta += f"\nTotale giornaliero: {totale} kcal"
+    await update.message.reply_text(risposta)
 
-def format_riepilogo_giorno(d: date) -> str:
-    pasti = get_pasti_by_date(d)
+# -----------------------------
+# RIEPILOGO PASTO
+# -----------------------------
+
+async def riepilogo_pasto(update: Update, testo: str, intent: dict):
+    pasto = intent.get("pasto")
+    data = riconosci_data_da_intent(intent.get("data"), testo)
+
+    if not pasto:
+        await update.message.reply_text("Non ho capito quale pasto vuoi vedere.")
+        return
+
+    res = supabase.table("pasti").select("*").eq("data", data).eq("pasto", pasto).execute()
+    pasti = res.data or []
+
     if not pasti:
-        return f"Nessun pasto registrato per {d.isoformat()}."
+        await update.message.reply_text(f"Nessun elemento per {pasto} di {data}.")
+        return
 
-    by_pasto = {"colazione": [], "pranzo": [], "cena": [], "non_specificato": []}
+    risposta = f"{pasto.capitalize()} di {data}:\n\n"
+    totale = 0
+
     for r in pasti:
-        by_pasto.get(r["pasto"], by_pasto["non_specificato"]).append(r)
+        risposta += f"- {r['descrizione']} ({r['kcal']} kcal)\n"
+        totale += r["kcal"]
 
-    lines = [f"Giorno: {d.isoformat()}"]
-    tot = 0
-    for p in ["colazione", "pranzo", "cena", "non_specificato"]:
-        if by_pasto[p]:
-            lines.append("")
-            lines.append(f"{p.capitalize()}:")
-            for r in by_pasto[p]:
-                lines.append(f"- {r['descrizione']} ({r['kcal']} kcal)")
-                tot += r["kcal"]
-    lines.append("")
-    lines.append(f"Totale: {tot} kcal")
-    return "\n".join(lines)
+    risposta += f"\nTotale: {totale} kcal"
+    await update.message.reply_text(risposta)
 
-
-# ---------------------------------------------------------
-# CANCELLAZIONE
-# ---------------------------------------------------------
+# -----------------------------
+# CANCELLAZIONE MIGLIORATA
+# -----------------------------
 
 async def cancella_ai(update: Update, testo: str, intent: dict):
-    t = testo.lower()
-    intent_alimento = intent.get("alimento")
-    intent_pasto = intent.get("pasto")
-    intent_data = intent.get("data")
+    intent_alimento = None
 
-    d = riconosci_data_da_intent(intent_data, testo)
-    data_str = date_to_iso(d)
+    # alimento può essere in "alimento" o in "alimenti"
+    if intent.get("alimento"):
+        intent_alimento = intent["alimento"]
+    else:
+        arr = intent.get("alimenti", [])
+        if arr and arr[0].get("alimento"):
+            intent_alimento = arr[0]["alimento"]
 
-    res = supabase.table("pasti").select("*").execute()
-    candidati = [r for r in res.data if r["ora"].startswith(data_str)]
+    if not intent_alimento:
+        await update.message.reply_text("Non ho capito cosa vuoi cancellare.")
+        return
 
-    if intent_pasto in ["colazione", "pranzo", "cena"]:
-        candidati = [r for r in candidati if r["pasto"] == intent_pasto]
+    data = riconosci_data_da_intent(intent.get("data"), testo)
 
-    if intent_alimento:
-        a = intent_alimento.lower()
-        candidati = [r for r in candidati if a in r["descrizione"].lower()]
+    res = supabase.table("pasti").select("*").eq("data", data).execute()
+    candidati = res.data or []
 
-    # Se l'utente ha specificato un alimento, filtriamo
-    if intent_alimento:
+    # Filtra per alimento
     a = intent_alimento.lower()
     candidati = [r for r in candidati if a in r["descrizione"].lower()]
 
-    # Se dopo il filtro non c'è nulla → non trovato
     if not candidati:
-    await update.message.reply_text(f"Non ho trovato '{intent_alimento}' da cancellare.")
-    return
+        await update.message.reply_text(f"Non ho trovato '{intent_alimento}' da cancellare.")
+        return
 
-    # Se c'è un solo match → cancellalo subito
     if len(candidati) == 1:
-    r = candidati[0]
-    supabase.table("pasti").delete().eq("id", r["id"]).execute()
-    await update.message.reply_text(f"Ho cancellato: {r['descrizione']} ({r['kcal']} kcal)")
-    return
+        r = candidati[0]
+        supabase.table("pasti").delete().eq("id", r["id"]).execute()
+        await update.message.reply_text(f"Ho cancellato: {r['descrizione']} ({r['kcal']} kcal)")
+        return
 
-    # Se ci sono più match → chiedi quale
-    keyboard = []
-    for r in candidati:
-    label = f"{r['descrizione']} - {r['ora'][11:16]}"
-    keyboard.append([InlineKeyboardButton(label, callback_data=f"del_{r['id']}")])
-
-    await update.message.reply_text(
-    f"Ho trovato più elementi che contengono '{intent_alimento}'. Quale vuoi cancellare?",
-    reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-
+    # Più risultati → chiedi quale
     keyboard = []
     for r in candidati:
         label = f"{r['descrizione']} - {r['ora'][11:16]}"
         keyboard.append([InlineKeyboardButton(label, callback_data=f"del_{r['id']}")])
 
     await update.message.reply_text(
-        "Ho trovato più elementi. Quale vuoi cancellare?",
+        f"Ho trovato più elementi che contengono '{intent_alimento}'. Quale vuoi cancellare?",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     
-    # ---------------------------------------------------------
-# PENDING / CALLBACK
-# ---------------------------------------------------------
+    # -----------------------------
+# LOGICA PRINCIPALE (TESTO + VOCALI)
+# -----------------------------
 
-def check_pending_timeout(context: ContextTypes.DEFAULT_TYPE):
-    ud = context.user_data
-    ts = ud.get("pending_timestamp")
-    if not ts:
-        return False
-    return (time.time() - ts) > PENDING_TIMEOUT
-
-
-async def reset_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ud = context.user_data
-    ud.clear()
-    if update.message:
-        await update.message.reply_text(
-            "Ho annullato la richiesta precedente perché non hai risposto."
-        )
-
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    data = query.data
-
-    await query.answer()
-
-    if data.startswith("del_"):
-        id_da_cancellare = int(data.replace("del_", ""))
-        res = supabase.table("pasti").select("*").eq("id", id_da_cancellare).execute()
-        if not res.data:
-            await query.edit_message_text("Elemento già cancellato.")
-            return
-
-        r = res.data[0]
-        supabase.table("pasti").delete().eq("id", id_da_cancellare).execute()
-        await query.edit_message_text(
-            f"Ho cancellato: {r['descrizione']} ({r['kcal']} kcal)"
-        )
-        return
-
-
-# ---------------------------------------------------------
-# COMANDI
-# ---------------------------------------------------------
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ALLOWED_USER_ID:
+async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if user_id != ALLOWED_USER_ID:
         await update.message.reply_text("Non sei autorizzato a usare questo bot.")
         return
 
-    await update.message.reply_text(
-        "Diario alimentare attivo.\n"
-        "- Scrivimi o mandami un vocale per registrare cosa hai mangiato.\n"
-        "- Puoi elencare più alimenti insieme.\n"
-        "- Chiedimi \"quante kcal ha ...\" per sapere le calorie.\n"
-        "- Chiedimi \"riepilogo di oggi\" o \"totale di oggi\".\n"
-        "- Puoi dire \"cancella il latte dalla colazione\"."
-    )
+    # Se arriva da vocale, usa il testo trascritto
+    testo = context.user_data.get("voice_text") or update.message.text
+    testo = testo.strip().lower()
 
+    intent = ai_parse_intent(testo)
+    azione = intent.get("intento")
 
-async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    risposta = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": "Dimmi un numero a caso tra 1 e 1000."}],
-    )
-    testo = risposta.choices[0].message.content.strip()
-    await update.message.reply_text("Risposta LLaMA: " + testo)
+    if azione == "aggiungi":
+        await aggiungi_ai(update, testo, intent)
+    elif azione == "riepilogo_giorno":
+        await riepilogo_giorno(update, testo, intent)
+    elif azione == "riepilogo_pasto":
+        await riepilogo_pasto(update, testo, intent)
+    elif azione == "cancella":
+        await cancella_ai(update, testo, intent)
+    else:
+        await update.message.reply_text("Non ho capito cosa vuoi fare.")
 
+    # pulizia
+    context.user_data["voice_text"] = None
 
-# ---------------------------------------------------------
-# HANDLER VOCALE
-# ---------------------------------------------------------
+# -----------------------------
+# CALLBACK PER CANCELLAZIONE
+# -----------------------------
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+
+    if data.startswith("del_"):
+        id_da_cancellare = data.replace("del_", "")
+        supabase.table("pasti").delete().eq("id", id_da_cancellare).execute()
+        await query.edit_message_text("Elemento cancellato.")
+        return
+
+# -----------------------------
+# GESTIONE VOCALI
+# -----------------------------
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -548,156 +383,43 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     percorso = f"/tmp/{file.file_id}.ogg"
     await file.download_to_drive(percorso)
 
-    # Trascrivi
-    testo = trascrivi_audio(percorso)
+    # Converti in wav (pydub)
+    wav_path = percorso.replace(".ogg", ".wav")
+    AudioSegment.from_file(percorso).export(wav_path, format="wav")
 
-    # Mostra cosa hai detto (debug)
+    # Trascrivi
+    testo = trascrivi_audio(wav_path)
+
+    # Mostra cosa hai detto
     await update.message.reply_text(f"🎤 Hai detto:\n{testo}")
 
     # Normalizza
     testo_norm = testo.lower().strip().replace(".", "")
 
-    # Salviamo il testo trascritto per log_food()
+    # Salva per log_food()
     context.user_data["voice_text"] = testo_norm
 
-    # Eseguiamo la logica principale
+    # Esegui logica
     await log_food(update, context)
 
-
-# ---------------------------------------------------------
-# LOGICA PRINCIPALE
-# ---------------------------------------------------------
-
-async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id != ALLOWED_USER_ID:
-        await update.message.reply_text("Non sei autorizzato a usare questo bot.")
-        return
-
-    # Se arriva da vocale, usa il testo trascritto
-    testo = context.user_data.get("voice_text") or update.message.text
-    testo = testo.strip()
-    ud = context.user_data
-
-    if check_pending_timeout(context):
-        await reset_pending(update, context)
-
-    # Parsing AI
-    intent = ai_parse_intent(testo)
-    intento = intent.get("intento", "altro")
-    alimenti_ai = intent.get("alimenti", [])
-
-    # ----------------- CHIEDI CALORIE -----------------
-    if intento == "chiedi_calorie":
-        risposta = ai_risposta_calorie_testuale(testo)
-        await update.message.reply_text(risposta)
-        return
-
-    # ----------------- CANCELLA -----------------
-    if intento == "cancella":
-        await cancella_ai(update, testo, intent)
-        return
-
-    # ----------------- RIEPILOGO PASTO -----------------
-    if intento == "riepilogo_pasto":
-        pasto = riconosci_pasto_da_intent(intent.get("pasto"), testo)
-        d = riconosci_data_da_intent(intent.get("data"), testo)
-        msg = format_riepilogo_pasto(d, pasto)
-        await update.message.reply_text(msg)
-        return
-
-    # ----------------- RIEPILOGO GIORNO -----------------
-    if intento == "riepilogo_giorno":
-        d = riconosci_data_da_intent(intent.get("data"), testo)
-        msg = format_riepilogo_giorno(d)
-        await update.message.reply_text(msg)
-        return
-
-    # ----------------- SOMMA GIORNO -----------------
-    if intento == "somma_giorno":
-        d = riconosci_data_da_intent(intent.get("data"), testo)
-        tot = somma_calorie_giorno(d)
-        await update.message.reply_text(f"Totale giornaliero: {tot} kcal")
-        return
-
-    # ----------------- SOMMA PASTO -----------------
-    if intento == "somma_pasto":
-        pasto = riconosci_pasto_da_intent(intent.get("pasto"), testo)
-        d = riconosci_data_da_intent(intent.get("data"), testo)
-        tot = somma_calorie_pasto(d, pasto)
-        await update.message.reply_text(f"Totale {pasto}: {tot} kcal")
-        return
-
-    # ----------------- AGGIUNGI (MULTI-ALIMENTO) -----------------
-    if intento == "aggiungi":
-        if not alimenti_ai:
-            await update.message.reply_text(
-                "Non ho capito bene cosa hai mangiato. Puoi ripetere?"
-            )
-            return
-
-        pasto = riconosci_pasto_da_intent(intent.get("pasto"), testo)
-        d = riconosci_data_da_intent(intent.get("data"), testo)
-
-        risposte = []
-        totale_kcal = 0
-
-        for item in alimenti_ai:
-            alimento = item.get("alimento")
-            quantita_str = item.get("quantita")
-            quantita = parse_quantita_string(quantita_str)
-
-            if not alimento:
-                continue
-
-            # Calcolo kcal
-            if quantita and quantita["tipo"] in ["grammi", "ml"]:
-                tipo_q = "grammi" if quantita["tipo"] == "grammi" else "ml"
-                base = ai_kcal_per_100(alimento, tipo_q)
-                kcal = int((base * quantita["valore"]) / 100)
-            elif quantita and quantita["tipo"] in ["pezzi", "porzione"]:
-                descr = f"{quantita_str} {alimento}"
-                kcal = ai_kcal_totali(descr)
-            else:
-                kcal = ai_kcal_totali(alimento)
-
-            # Descrizione fedele (mostra quantità)
-            if quantita_str:
-                descrizione = f"{quantita_str} {alimento}"
-            else:
-                descrizione = alimento
-
-            # Salva riga
-            salva_pasto(pasto, descrizione, kcal, d)
-
-            # Risposta
-            risposte.append(f"- {descrizione} ({kcal} kcal)")
-            totale_kcal += kcal
-
-        msg = f"Registrato {pasto}:\n" + "\n".join(risposte) + f"\nTotale: {totale_kcal} kcal"
-        await update.message.reply_text(msg)
-        return
-
-    # ----------------- ALTRO -----------------
-    await update.message.reply_text(
-        "Ho capito il messaggio, ma non sembra un pasto o una richiesta del diario.\n"
-        "Puoi dirmi cosa hai mangiato, chiedermi le calorie o chiedere un riepilogo."
-    )
-
-
-# ---------------------------------------------------------
+# -----------------------------
 # AVVIO BOT
-# ---------------------------------------------------------
+# -----------------------------
 
-if __name__ == "__main__":
-    app = ApplicationBuilder().token(TOKEN).build()
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("debug", debug))
-
-    app.add_handler(CallbackQueryHandler(button_callback))
-
-    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    # Testo
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, log_food))
 
+    # Vocali
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+
+    # Pulsanti
+    app.add_handler(CallbackQueryHandler(button_callback))
+
+    print("Bot avviato!")
     app.run_polling()
+
+if __name__ == "__main__":
+    main()
