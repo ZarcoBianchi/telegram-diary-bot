@@ -534,11 +534,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Salviamo il testo trascritto per log_food()
     context.user_data["voice_text"] = testo_norm
 
-    # Ora chiamiamo log_food normalmente
+    # Eseguiamo la logica principale
     await log_food(update, context)
-
-    # Puliamo dopo l'uso
-    context.user_data["voice_text"] = None
 
 
 # ---------------------------------------------------------
@@ -551,7 +548,9 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Non sei autorizzato a usare questo bot.")
         return
 
-    testo = context.user_data.get("voice_text") or update.message.text.strip()
+    # Se arriva da vocale, usa il testo trascritto
+    testo = context.user_data.get("voice_text") or update.message.text
+    testo = testo.strip()
     ud = context.user_data
 
     if check_pending_timeout(context):
