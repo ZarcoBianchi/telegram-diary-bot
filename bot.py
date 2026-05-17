@@ -21,6 +21,10 @@ from telegram.ext import (
     filters,
 )
 
+# Whisper
+from faster_whisper import WhisperModel
+from pydub import AudioSegment
+
 # ---------------------------------------------------------
 # CONFIGURAZIONE
 # ---------------------------------------------------------
@@ -36,11 +40,11 @@ client = Groq(api_key=GROQ_API_KEY)
 
 MODEL_NAME = "llama-3.3-70b-versatile"
 
-# SOLO TU PUOI USARE IL BOT
 ALLOWED_USER_ID = 1042036959
-
-# Timeout pending (in secondi)
 PENDING_TIMEOUT = 10
+
+# Whisper model
+whisper_model = WhisperModel("small", device="cpu", compute_type="int8")
 
 
 # ---------------------------------------------------------
@@ -57,10 +61,6 @@ def parse_natural_date(testo: str) -> date:
         return oggi - timedelta(days=1)
     if "l'altro ieri" in testo or "l’altro ieri" in testo:
         return oggi - timedelta(days=2)
-    if "due giorni fa" in testo:
-        return oggi - timedelta(days=2)
-    if "tre giorni fa" in testo:
-        return oggi - timedelta(days=3)
 
     giorni = {
         "lunedì": 0, "lunedi": 0,
@@ -95,18 +95,10 @@ def date_to_iso(d: date) -> str:
 
 
 # ---------------------------------------------------------
-# AI: INTENT + PARSING MULTI-ALIMENTO
+# AI: INTENT + PARSING MULTI-ALIMENTO (VERSIONE MIGLIORATA)
 # ---------------------------------------------------------
 
 def ai_parse_intent(testo: str) -> dict:
-    """
-    Parsing AI avanzato con 'parsing libero intelligente':
-    - NON dividere alimenti composti (es. 'crepes con la nutella')
-    - Dividere solo alimenti realmente distinti
-    - Riconoscere quantità
-    - Restituire JSON pulito
-    """
-
     prompt = f"""
 Sei un parser di comandi per un diario alimentare.
 
@@ -126,37 +118,30 @@ Il tuo compito è analizzare il messaggio dell'utente e restituire SOLO un JSON 
 
 ### REGOLE DI PARSING (IMPORTANTISSIME)
 
-1. **NON dividere mai un alimento composto.**
-   Esempi:
+1. NON dividere mai un alimento composto:
    - "crepes con la nutella"
    - "pane e marmellata"
    - "pasta al pesto"
    - "riso con pollo e verdure"
    - "yogurt con cereali"
-   - "biscotti al cioccolato"
-   - "fette biscottate con marmellata"
 
-2. **Dividi gli alimenti solo quando sono chiaramente separati.**
-   Esempi:
+2. Dividi gli alimenti solo quando sono chiaramente separati:
    - "3 crepes con la nutella e un cappuccino" → 2 alimenti
-   - "un panino con prosciutto e una coca cola" → 2 alimenti
    - "pasta al pesto, insalata e una mela" → 3 alimenti
 
-3. **NON dividere mai ingredienti interni.**
-   Esempi:
+3. NON dividere ingredienti interni:
    - "crepes con la nutella" NON diventa ["crepes", "nutella"]
-   - "pane e marmellata" NON diventa ["pane", "marmellata"]
 
-4. **Quantità**
+4. Quantità:
    - Se c'è un numero prima dell'alimento, mettilo in "quantita".
    - Se non c'è quantità, lascia "quantita": null.
 
-5. **Se non ci sono alimenti (es. domande, riepiloghi), restituisci "alimenti": [].**
+5. Se non ci sono alimenti (domande, riepiloghi), "alimenti": [].
 
 Messaggio utente:
 "{testo}"
 
-Rispondi SOLO con il JSON, senza alcun testo aggiuntivo.
+Rispondi SOLO con il JSON.
 """
 
     try:
@@ -166,11 +151,9 @@ Rispondi SOLO con il JSON, senza alcun testo aggiuntivo.
         )
         raw = response.choices[0].message.content.strip()
 
-        # Prova JSON diretto
         try:
             return json.loads(raw)
         except:
-            # Prova a estrarre JSON con regex
             m = re.search(r"\{.*\}", raw, re.DOTALL)
             if m:
                 return json.loads(m.group(0))
@@ -178,7 +161,6 @@ Rispondi SOLO con il JSON, senza alcun testo aggiuntivo.
     except:
         pass
 
-    # Fallback minimo
     return {
         "intento": "altro",
         "pasto": None,
@@ -188,7 +170,7 @@ Rispondi SOLO con il JSON, senza alcun testo aggiuntivo.
 
 
 # ---------------------------------------------------------
-# PARSING QUANTITÀ (da stringa tipo "30g", "200ml", ecc.)
+# PARSING QUANTITÀ
 # ---------------------------------------------------------
 
 def parse_quantita_string(q: str | None):
@@ -218,26 +200,30 @@ def parse_quantita_string(q: str | None):
         return {"tipo": "grammi", "valore": 15}
     if "cucchiaino" in t:
         return {"tipo": "grammi", "valore": 5}
-    if "mezzo bicchiere" in t:
-        return {"tipo": "ml", "valore": 75}
     if "bicchiere" in t:
         return {"tipo": "ml", "valore": 150}
-    if "mezza porzione" in t:
-        return {"tipo": "porzione", "valore": 0.5}
-    if "porzione" in t:
-        return {"tipo": "porzione", "valore": 1}
 
     return None
+
+
+# ---------------------------------------------------------
+# WHISPER: TRASCRIZIONE AUDIO
+# ---------------------------------------------------------
+
+def trascrivi_audio(percorso):
+    audio = AudioSegment.from_file(percorso)
+    wav_path = percorso + ".wav"
+    audio.export(wav_path, format="wav")
+
+    segments, info = whisper_model.transcribe(wav_path, beam_size=1)
+    testo = "".join([seg.text for seg in segments]).strip()
+    return testo
     
     # ---------------------------------------------------------
 # AI: STIMA CALORIE
 # ---------------------------------------------------------
 
 def ai_kcal_per_100(alimento: str, tipo_quantita: str) -> int:
-    """
-    tipo_quantita: "grammi" → chiedi per 100g
-                   "ml"     → chiedi per 100ml
-    """
     if tipo_quantita == "grammi":
         domanda = f"Quante kcal per 100g ha {alimento}? Rispondi solo con un numero."
     else:
@@ -283,7 +269,7 @@ Rispondi in italiano, in modo breve, indicando chiaramente:
 - il valore in kcal
 - l'unità di riferimento (100g, 100ml, porzione, ecc.)
 
-Esempi di risposte:
+Esempi:
 - "Il cioccolato ha circa 575 kcal per 100g."
 - "Il latte intero ha circa 60 kcal per 100ml."
 - "Una fetta di torta ha circa 240 kcal."
@@ -316,7 +302,6 @@ def riconosci_pasto_da_intent(intent_pasto: str | None, testo: str) -> str:
     if "cena" in t:
         return "cena"
 
-    # fallback: orario
     h = datetime.now().hour
     if 5 <= h < 11:
         return "colazione"
@@ -505,7 +490,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "Diario alimentare attivo.\n"
-        "- Scrivimi cosa hai mangiato per registrarlo.\n"
+        "- Scrivimi o mandami un vocale per registrare cosa hai mangiato.\n"
         "- Puoi elencare più alimenti insieme.\n"
         "- Chiedimi \"quante kcal ha ...\" per sapere le calorie.\n"
         "- Chiedimi \"riepilogo di oggi\" o \"totale di oggi\".\n"
@@ -520,6 +505,33 @@ async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     testo = risposta.choices[0].message.content.strip()
     await update.message.reply_text("Risposta LLaMA: " + testo)
+
+
+# ---------------------------------------------------------
+# HANDLER VOCALE
+# ---------------------------------------------------------
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if user_id != ALLOWED_USER_ID:
+        await update.message.reply_text("Non sei autorizzato a usare questo bot.")
+        return
+
+    # Scarica il file vocale
+    file = await update.message.voice.get_file()
+    percorso = f"/tmp/{file.file_id}.ogg"
+    await file.download_to_drive(percorso)
+
+    # Trascrivi
+    testo = trascrivi_audio(percorso)
+
+    # Mostra cosa hai detto (debug)
+    await update.message.reply_text(f"🎤 Hai detto:\n{testo}")
+
+    # Passa il testo alla logica principale
+    fake_update = update
+    fake_update.message.text = testo
+    await log_food(fake_update, context)
 
 
 # ---------------------------------------------------------
@@ -538,11 +550,10 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if check_pending_timeout(context):
         await reset_pending(update, context)
 
-    # 🔥 Parsing AI avanzato
+    # Parsing AI
     intent = ai_parse_intent(testo)
     intento = intent.get("intento", "altro")
     alimenti_ai = intent.get("alimenti", [])
-    now = datetime.now()
 
     # ----------------- CHIEDI CALORIE -----------------
     if intento == "chiedi_calorie":
@@ -618,20 +629,19 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 kcal = ai_kcal_totali(alimento)
 
-            # Descrizione per Supabase
+            # Descrizione fedele (mostra quantità)
             if quantita_str:
                 descrizione = f"{quantita_str} {alimento}"
             else:
                 descrizione = alimento
 
-            # Salva riga singola
+            # Salva riga
             salva_pasto(pasto, descrizione, kcal, d)
 
-            # Prepara risposta
+            # Risposta
             risposte.append(f"- {descrizione} ({kcal} kcal)")
             totale_kcal += kcal
 
-        # Risposta finale
         msg = f"Registrato {pasto}:\n" + "\n".join(risposte) + f"\nTotale: {totale_kcal} kcal"
         await update.message.reply_text(msg)
         return
@@ -649,8 +659,13 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("debug", debug))
+
     app.add_handler(CallbackQueryHandler(button_callback))
+
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, log_food))
+
     app.run_polling()
