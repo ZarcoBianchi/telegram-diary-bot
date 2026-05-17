@@ -10,7 +10,6 @@ from telegram import (
 )
 from telegram.ext import (
     ApplicationBuilder,
-    CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
     ContextTypes,
@@ -151,7 +150,7 @@ def riconosci_data_da_intent(intent_data, testo):
 
     return oggi
     
-    # -----------------------------
+# -----------------------------
 # CALORIE (AI)
 # -----------------------------
 
@@ -279,7 +278,6 @@ async def riepilogo_pasto(update: Update, testo: str, intent: dict):
 async def cancella_ai(update: Update, testo: str, intent: dict):
     intent_alimento = None
 
-    # alimento può essere in "alimento" o in "alimenti"
     if intent.get("alimento"):
         intent_alimento = intent["alimento"]
     else:
@@ -296,7 +294,6 @@ async def cancella_ai(update: Update, testo: str, intent: dict):
     res = supabase.table("pasti").select("*").eq("data", data).execute()
     candidati = res.data or []
 
-    # Filtra per alimento
     a = intent_alimento.lower()
     candidati = [r for r in candidati if a in r["descrizione"].lower()]
 
@@ -310,7 +307,6 @@ async def cancella_ai(update: Update, testo: str, intent: dict):
         await update.message.reply_text(f"Ho cancellato: {r['descrizione']} ({r['kcal']} kcal)")
         return
 
-    # Più risultati → chiedi quale
     keyboard = []
     for r in candidati:
         label = f"{r['descrizione']} - {r['ora'][11:16]}"
@@ -321,7 +317,7 @@ async def cancella_ai(update: Update, testo: str, intent: dict):
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     
-    # -----------------------------
+# -----------------------------
 # LOGICA PRINCIPALE (TESTO + VOCALI)
 # -----------------------------
 
@@ -331,7 +327,6 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Non sei autorizzato a usare questo bot.")
         return
 
-    # Se arriva da vocale, usa il testo trascritto
     testo = context.user_data.get("voice_text") or update.message.text
     testo = testo.strip().lower()
 
@@ -349,7 +344,6 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Non ho capito cosa vuoi fare.")
 
-    # pulizia
     context.user_data["voice_text"] = None
 
 # -----------------------------
@@ -378,28 +372,20 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Non sei autorizzato a usare questo bot.")
         return
 
-    # Scarica il file vocale
     file = await update.message.voice.get_file()
     percorso = f"/tmp/{file.file_id}.ogg"
     await file.download_to_drive(percorso)
 
-    # Converti in wav (pydub)
     wav_path = percorso.replace(".ogg", ".wav")
     AudioSegment.from_file(percorso).export(wav_path, format="wav")
 
-    # Trascrivi
     testo = trascrivi_audio(wav_path)
 
-    # Mostra cosa hai detto
     await update.message.reply_text(f"🎤 Hai detto:\n{testo}")
 
-    # Normalizza
     testo_norm = testo.lower().strip().replace(".", "")
-
-    # Salva per log_food()
     context.user_data["voice_text"] = testo_norm
 
-    # Esegui logica
     await log_food(update, context)
 
 # -----------------------------
@@ -409,13 +395,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Testo
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, log_food))
-
-    # Vocali
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
-
-    # Pulsanti
     app.add_handler(CallbackQueryHandler(button_callback))
 
     print("Bot avviato!")
