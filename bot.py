@@ -528,12 +528,18 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Mostra cosa hai detto (debug)
     await update.message.reply_text(f"🎤 Hai detto:\n{testo}")
 
-    # Normalizza il testo per il parser AI
-    testo_norm = testo.lower().strip().replace(".", "")
+    # Normalizza leggermente
+    testo_norm = testo.lower().strip()
 
-    # Passa il testo alla logica principale
+    # --- QUI LA MAGIA ---
+    # Passiamo il testo trascritto direttamente alla AI
+    intent = ai_parse_intent(testo_norm)
+
+    # Ora eseguiamo la stessa logica di log_food(),
+    # ma usando il testo trascritto invece di update.message.text
     fake_update = update
-    fake_update.message.text = testo_norm
+    fake_update.message.text = testo_norm  # NON viene usato da Telegram, ma solo da noi
+
     await log_food(fake_update, context)
 
 
