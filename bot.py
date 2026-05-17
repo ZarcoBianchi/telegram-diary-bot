@@ -95,21 +95,24 @@ def date_to_iso(d: date) -> str:
 
 
 # ---------------------------------------------------------
-# AI: INTENT + ESTRATTORI
+# AI: INTENT + PARSING MULTI-ALIMENTO
 # ---------------------------------------------------------
 
 def ai_parse_intent(testo: str) -> dict:
     """
-    L'AI deve rispondere SOLO con un JSON, senza testo attorno, nel formato:
+    L’AI deve restituire SOLO un JSON, senza testo attorno, nel formato:
 
     {
-      "intento": "aggiungi | chiedi_calorie | riepilogo_giorno | riepilogo_pasto | somma_giorno | somma_pasto | cancella | altro",
-      "alimento": "string | null",
-      "quantita": "string | null",
-      "pasto": "colazione | pranzo | cena | null",
-      "data": "oggi | ieri | null"
+      "intento": "...",
+      "pasto": "...",
+      "data": "...",
+      "alimenti": [
+        { "alimento": "...", "quantita": "..." },
+        ...
+      ]
     }
     """
+
     prompt = f"""
 Sei un parser di comandi per un diario alimentare.
 
@@ -117,67 +120,52 @@ Devi analizzare il seguente messaggio dell'utente e restituire SOLO un JSON vali
 
 {{
   "intento": "aggiungi | chiedi_calorie | riepilogo_giorno | riepilogo_pasto | somma_giorno | somma_pasto | cancella | altro",
-  "alimento": "string o null",
-  "quantita": "string o null",
   "pasto": "colazione | pranzo | cena | null",
-  "data": "oggi | ieri | null"
+  "data": "oggi | ieri | null",
+  "alimenti": [
+    {{
+      "alimento": "string o null",
+      "quantita": "string o null"
+    }}
+  ]
 }}
 
 Regole:
-- "aggiungi": quando l'utente vuole registrare qualcosa che ha mangiato o bevuto.
-- "chiedi_calorie": quando chiede quante calorie/kcal ha un alimento o una porzione.
-- "riepilogo_giorno": quando chiede cosa ha mangiato in un giorno (es. "riepilogo di oggi", "cosa ho mangiato oggi").
-- "riepilogo_pasto": quando chiede cosa ha mangiato in un pasto specifico (es. "cosa ho mangiato a pranzo").
-- "somma_giorno": quando chiede il totale delle calorie di un giorno.
-- "somma_pasto": quando chiede il totale delle calorie di un pasto specifico.
-- "cancella": quando vuole cancellare qualcosa (es. "cancella il latte dalla colazione").
-- "altro": per tutto il resto.
-
-- "alimento": il nome dell'alimento o bevanda, se rilevante, altrimenti null.
-- "quantita": la quantità così come appare (es. "30g", "200ml", "2 biscotti"), altrimenti null.
-- "pasto": "colazione", "pranzo" o "cena" se è chiaramente indicato, altrimenti null.
-- "data": "oggi" o "ieri" se è chiaramente indicato, altrimenti null.
+- Se l'utente elenca più alimenti, dividili in elementi separati.
+- Se la quantità è presente (es. "3 crepes", "200ml", "2 biscotti"), mettila nel campo "quantita".
+- Se non c'è quantità, lascia "quantita": null.
+- Se non ci sono alimenti (es. domande, riepiloghi), "alimenti" deve essere una lista vuota [].
 
 Messaggio utente:
 "{testo}"
 
 Rispondi SOLO con il JSON, senza alcun testo aggiuntivo.
 """
+
     try:
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = response.choices[0].message.content.strip()
-        # Proviamo a trovare il primo blocco JSON
+
         try:
-            data = json.loads(raw)
-            return data
+            return json.loads(raw)
         except:
-            # Prova a estrarre con regex
             m = re.search(r"\{.*\}", raw, re.DOTALL)
             if m:
                 return json.loads(m.group(0))
+
     except:
         pass
 
-    # Fallback minimale se l'AI fallisce
-    t = testo.lower()
-    if "cancella" in t or "elimina" in t or "rimuovi" in t:
-        return {"intento": "cancella", "alimento": None, "quantita": None, "pasto": None, "data": None}
-    if "quante calorie" in t or "quante kcal" in t:
-        return {"intento": "chiedi_calorie", "alimento": None, "quantita": None, "pasto": None, "data": None}
-    if "riepilogo" in t or "cosa ho mangiato" in t:
-        if "colazione" in t or "pranzo" in t or "cena" in t:
-            return {"intento": "riepilogo_pasto", "alimento": None, "quantita": None, "pasto": None, "data": None}
-        return {"intento": "riepilogo_giorno", "alimento": None, "quantita": None, "pasto": None, "data": None}
-    if "totale" in t or "somma" in t or "quante kcal ho mangiato" in t:
-        if "colazione" in t or "pranzo" in t or "cena" in t:
-            return {"intento": "somma_pasto", "alimento": None, "quantita": None, "pasto": None, "data": None}
-        return {"intento": "somma_giorno", "alimento": None, "quantita": None, "pasto": None, "data": None}
-
-    # default: altro (NON aggiungi!)
-    return {"intento": "altro", "alimento": None, "quantita": None, "pasto": None, "data": None}
+    # Fallback minimo
+    return {
+        "intento": "altro",
+        "pasto": None,
+        "data": None,
+        "alimenti": []
+    }
 
 
 # ---------------------------------------------------------
@@ -221,9 +209,8 @@ def parse_quantita_string(q: str | None):
         return {"tipo": "porzione", "valore": 1}
 
     return None
-
-
-# ---------------------------------------------------------
+    
+    # ---------------------------------------------------------
 # AI: STIMA CALORIE
 # ---------------------------------------------------------
 
@@ -295,12 +282,13 @@ Rispondi con UNA sola frase.
 
 
 # ---------------------------------------------------------
-# RICONOSCIMENTO PASTO
+# RICONOSCIMENTO PASTO E DATA
 # ---------------------------------------------------------
 
 def riconosci_pasto_da_intent(intent_pasto: str | None, testo: str) -> str:
     if intent_pasto in ["colazione", "pranzo", "cena"]:
         return intent_pasto
+
     t = testo.lower()
     if "colazione" in t:
         return "colazione"
@@ -308,6 +296,7 @@ def riconosci_pasto_da_intent(intent_pasto: str | None, testo: str) -> str:
         return "pranzo"
     if "cena" in t:
         return "cena"
+
     # fallback: orario
     h = datetime.now().hour
     if 5 <= h < 11:
@@ -316,6 +305,7 @@ def riconosci_pasto_da_intent(intent_pasto: str | None, testo: str) -> str:
         return "pranzo"
     if 16 <= h < 23:
         return "cena"
+
     return "non_specificato"
 
 
@@ -324,11 +314,13 @@ def riconosci_data_da_intent(intent_data: str | None, testo: str) -> date:
         return date.today()
     if intent_data == "ieri":
         return date.today() - timedelta(days=1)
+
     t = testo.lower()
     if "ieri" in t:
         return date.today() - timedelta(days=1)
     if "oggi" in t:
         return date.today()
+
     return parse_natural_date(testo)
 
 
@@ -435,13 +427,13 @@ async def cancella_ai(update: Update, testo: str, intent: dict):
     for r in candidati:
         label = f"{r['descrizione']} - {r['ora'][11:16]}"
         keyboard.append([InlineKeyboardButton(label, callback_data=f"del_{r['id']}")])
+
     await update.message.reply_text(
         "Ho trovato più elementi. Quale vuoi cancellare?",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
-
-
-# ---------------------------------------------------------
+    
+    # ---------------------------------------------------------
 # PENDING / CALLBACK
 # ---------------------------------------------------------
 
@@ -474,9 +466,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not res.data:
             await query.edit_message_text("Elemento già cancellato.")
             return
+
         r = res.data[0]
         supabase.table("pasti").delete().eq("id", id_da_cancellare).execute()
-        await query.edit_message_text(f"Ho cancellato: {r['descrizione']} ({r['kcal']} kcal)")
+        await query.edit_message_text(
+            f"Ho cancellato: {r['descrizione']} ({r['kcal']} kcal)"
+        )
         return
 
 
@@ -492,9 +487,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Diario alimentare attivo.\n"
         "- Scrivimi cosa hai mangiato per registrarlo.\n"
+        "- Puoi elencare più alimenti insieme.\n"
         "- Chiedimi \"quante kcal ha ...\" per sapere le calorie.\n"
-        "- Chiedimi \"riepilogo di oggi\" o \"totale di oggi\" per i riepiloghi.\n"
-        "- Puoi anche dire \"cancella il latte dalla colazione\"."
+        "- Chiedimi \"riepilogo di oggi\" o \"totale di oggi\".\n"
+        "- Puoi dire \"cancella il latte dalla colazione\"."
     )
 
 
@@ -523,10 +519,11 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if check_pending_timeout(context):
         await reset_pending(update, context)
 
+    # 🔥 Parsing AI avanzato
     intent = ai_parse_intent(testo)
     intento = intent.get("intento", "altro")
+    alimenti_ai = intent.get("alimenti", [])
     now = datetime.now()
-    t = testo.lower()
 
     # ----------------- CHIEDI CALORIE -----------------
     if intento == "chiedi_calorie":
@@ -541,8 +538,7 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ----------------- RIEPILOGO PASTO -----------------
     if intento == "riepilogo_pasto":
-        pasto = intent.get("pasto")
-        pasto = riconosci_pasto_da_intent(pasto, testo)
+        pasto = riconosci_pasto_da_intent(intent.get("pasto"), testo)
         d = riconosci_data_da_intent(intent.get("data"), testo)
         msg = format_riepilogo_pasto(d, pasto)
         await update.message.reply_text(msg)
@@ -564,61 +560,76 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ----------------- SOMMA PASTO -----------------
     if intento == "somma_pasto":
-        pasto = intent.get("pasto")
-        pasto = riconosci_pasto_da_intent(pasto, testo)
+        pasto = riconosci_pasto_da_intent(intent.get("pasto"), testo)
         d = riconosci_data_da_intent(intent.get("data"), testo)
         tot = somma_calorie_pasto(d, pasto)
         await update.message.reply_text(f"Totale {pasto}: {tot} kcal")
         return
 
-    # ----------------- AGGIUNGI (CASO PRINCIPALE) -----------------
+    # ----------------- AGGIUNGI (MULTI-ALIMENTO) -----------------
     if intento == "aggiungi":
-        alimento = intent.get("alimento")
-        quantita_str = intent.get("quantita")
-        quantita = parse_quantita_string(quantita_str)
-
-        if not alimento:
-            await update.message.reply_text("Non ho capito bene l'alimento. Puoi ripetere cosa hai mangiato?")
+        if not alimenti_ai:
+            await update.message.reply_text(
+                "Non ho capito bene cosa hai mangiato. Puoi ripetere?"
+            )
             return
 
+        pasto = riconosci_pasto_da_intent(intent.get("pasto"), testo)
         d = riconosci_data_da_intent(intent.get("data"), testo)
-        pasto_txt = riconosci_pasto_da_intent(intent.get("pasto"), testo)
 
-        # descrizione
-        if quantita:
-            if quantita["tipo"] == "grammi":
-                descrizione = f"{int(quantita['valore'])}g di {alimento}"
-            elif quantita["tipo"] == "ml":
-                descrizione = f"{int(quantita['valore'])}ml di {alimento}"
-            elif quantita["tipo"] == "pezzi":
-                descrizione = f"{int(quantita['valore'])} {quantita.get('unita','pezzi')} di {alimento}"
-            elif quantita["tipo"] == "porzione":
-                descrizione = f"{quantita['valore']} porzione di {alimento}"
+        risposte = []
+        totale_kcal = 0
+
+        for item in alimenti_ai:
+            alimento = item.get("alimento")
+            quantita_str = item.get("quantita")
+            quantita = parse_quantita_string(quantita_str)
+
+            if not alimento:
+                continue
+
+            # Calcolo kcal
+            if quantita and quantita["tipo"] in ["grammi", "ml"]:
+                tipo_q = "grammi" if quantita["tipo"] == "grammi" else "ml"
+                base = ai_kcal_per_100(alimento, tipo_q)
+                kcal = int((base * quantita["valore"]) / 100)
+            elif quantita and quantita["tipo"] in ["pezzi", "porzione"]:
+                descr = f"{quantita_str} {alimento}"
+                kcal = ai_kcal_totali(descr)
+            else:
+                kcal = ai_kcal_totali(alimento)
+
+            # Descrizione per Supabase
+            if quantita:
+                if quantita["tipo"] == "grammi":
+                    descrizione = f"{int(quantita['valore'])}g di {alimento}"
+                elif quantita["tipo"] == "ml":
+                    descrizione = f"{int(quantita['valore'])}ml di {alimento}"
+                elif quantita["tipo"] == "pezzi":
+                    descrizione = f"{int(quantita['valore'])} {quantita.get('unita','pezzi')} di {alimento}"
+                elif quantita["tipo"] == "porzione":
+                    descrizione = f"{quantita['valore']} porzione di {alimento}"
+                else:
+                    descrizione = alimento
             else:
                 descrizione = alimento
-        else:
-            descrizione = alimento
 
-        # calcolo kcal
-        if quantita and quantita["tipo"] in ["grammi", "ml"]:
-            tipo_q = "grammi" if quantita["tipo"] == "grammi" else "ml"
-            base = ai_kcal_per_100(alimento, tipo_q)
-            kcal = int((base * quantita["valore"]) / 100)
-        elif quantita and quantita["tipo"] in ["pezzi", "porzione"]:
-            kcal = ai_kcal_totali(descrizione)
-        else:
-            kcal = ai_kcal_totali(alimento)
+            # Salva riga singola
+            salva_pasto(pasto, descrizione, kcal, d)
 
-        salva_pasto(pasto_txt, descrizione, kcal, d)
-        await update.message.reply_text(
-            f"Registrato {pasto_txt}: {descrizione} ({kcal} kcal)"
-        )
+            # Prepara risposta
+            risposte.append(f"- {descrizione} ({kcal} kcal)")
+            totale_kcal += kcal
+
+        # Risposta finale
+        msg = f"Registrato {pasto}:\n" + "\n".join(risposte) + f"\nTotale: {totale_kcal} kcal"
+        await update.message.reply_text(msg)
         return
 
-    # ----------------- ALTRO / FALLBACK -----------------
+    # ----------------- ALTRO -----------------
     await update.message.reply_text(
-        "Ho capito il messaggio, ma non sembra un pasto o una richiesta sul diario.\n"
-        "Puoi dirmi cosa hai mangiato, chiedermi le calorie di un alimento o chiedere un riepilogo."
+        "Ho capito il messaggio, ma non sembra un pasto o una richiesta del diario.\n"
+        "Puoi dirmi cosa hai mangiato, chiedermi le calorie o chiedere un riepilogo."
     )
 
 
