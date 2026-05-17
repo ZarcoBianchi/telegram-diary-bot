@@ -17,7 +17,7 @@ from telegram.ext import (
 )
 
 from supabase import create_client
-from faster_whisper import WhisperModel
+from groq import Groq
 from pydub import AudioSegment
 
 # -----------------------------
@@ -32,22 +32,26 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 MODEL_NAME = "llama3-8b-8192"
-from groq import Groq
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 # -----------------------------
-# WHISPER
+# TRASCRIZIONE VOCALI (GROQ)
 # -----------------------------
-
-whisper_model = WhisperModel("small", device="cpu")
 
 def trascrivi_audio(percorso):
-    segments, info = whisper_model.transcribe(percorso, beam_size=5)
-    testo = " ".join([seg.text for seg in segments])
-    return testo.strip()
+    with open(percorso, "rb") as f:
+        audio_bytes = f.read()
+
+    response = client.audio.transcriptions.create(
+        file=("audio.wav", audio_bytes),
+        model="whisper-large-v3",
+        response_format="json"
+    )
+
+    return response["text"].strip()
 
 # -----------------------------
-# AI PARSER MIGLIORATO
+# AI PARSER
 # -----------------------------
 
 def ai_parse_intent(testo: str) -> dict:
@@ -68,40 +72,9 @@ Devi analizzare il messaggio dell'utente e restituire SOLO un JSON valido.
   ]
 }}
 
-### REGOLE IMPORTANTI
-
-1. Se il messaggio contiene:
-   - "oggi", "di oggi" → data = "oggi"
-   - "ieri", "di ieri" → data = "ieri"
-
-2. Se contiene:
-   - "colazione" → pasto = "colazione"
-   - "pranzo" → pasto = "pranzo"
-   - "cena" → pasto = "cena"
-
-3. Se contiene:
-   - "riepilogo", "recap", "resoconto", "mostrami"
-     *Se NON è specificato un pasto → riepilogo_giorno*
-     *Se è specificato un pasto → riepilogo_pasto*
-
-4. Se contiene:
-   - "totale", "quante calorie", "somma"
-     → somma_giorno o somma_pasto
-
-5. Se contiene:
-   - "aggiungi", "metti", "registra", "ho mangiato"
-     → intento = aggiungi
-
-6. Se contiene:
-   - "togli", "rimuovi", "elimina", "cancella"
-     → intento = cancella
-
-7. NON inventare alimenti.
-
 ### MESSAGGIO UTENTE
 "{testo}"
 
-### RISPOSTA
 Rispondi SOLO con il JSON.
 """
 
@@ -160,7 +133,7 @@ Stima le calorie dell'alimento seguente.
 Alimento: {alimento}
 Quantità: {quantita}
 
-Rispondi SOLO con un numero intero, senza testo aggiuntivo.
+Rispondi SOLO con un numero intero.
 """
 
     try:
@@ -183,7 +156,7 @@ async def aggiungi_ai(update: Update, testo: str, intent: dict):
     data = riconosci_data_da_intent(intent.get("data"), testo)
 
     if not pasto:
-        await update.message.reply_text("Non ho capito il pasto (colazione, pranzo, cena).")
+        await update.message.reply_text("Non ho capito il pasto.")
         return
 
     alimenti = intent.get("alimenti", [])
@@ -271,7 +244,7 @@ async def riepilogo_pasto(update: Update, testo: str, intent: dict):
     await update.message.reply_text(risposta)
 
 # -----------------------------
-# CANCELLAZIONE MIGLIORATA
+# CANCELLAZIONE
 # -----------------------------
 
 async def cancella_ai(update: Update, testo: str, intent: dict):
@@ -297,13 +270,13 @@ async def cancella_ai(update: Update, testo: str, intent: dict):
     candidati = [r for r in candidati if a in r["descrizione"].lower()]
 
     if not candidati:
-        await update.message.reply_text(f"Non ho trovato '{intent_alimento}' da cancellare.")
+        await update.message.reply_text(f"Non ho trovato '{intent_alimento}'.")
         return
 
     if len(candidati) == 1:
         r = candidati[0]
         supabase.table("pasti").delete().eq("id", r["id"]).execute()
-        await update.message.reply_text(f"Ho cancellato: {r['descrizione']} ({r['kcal']} kcal)")
+        await update.message.reply_text(f"Cancellato: {r['descrizione']}")
         return
 
     keyboard = []
@@ -315,35 +288,6 @@ async def cancella_ai(update: Update, testo: str, intent: dict):
         f"Ho trovato più elementi che contengono '{intent_alimento}'. Quale vuoi cancellare?",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
-
-# -----------------------------
-# LOGICA PRINCIPALE
-# -----------------------------
-
-async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id != ALLOWED_USER_ID:
-        await update.message.reply_text("Non sei autorizzato a usare questo bot.")
-        return
-
-    testo = context.user_data.get("voice_text") or update.message.text
-    testo = testo.strip().lower()
-
-    intent = ai_parse_intent(testo)
-    azione = intent.get("intento")
-
-    if azione == "aggiungi":
-        await aggiungi_ai(update, testo, intent)
-    elif azione == "riepilogo_giorno":
-        await riepilogo_giorno(update, testo, intent)
-    elif azione == "riepilogo_pasto":
-        await riepilogo_pasto(update, testo, intent)
-    elif azione == "cancella":
-        await cancella_ai(update, testo, intent)
-    else:
-        await update.message.reply_text("Non ho capito cosa vuoi fare.")
-
-    context.user_data["voice_text"] = None
 
 # -----------------------------
 # CALLBACK CANCELLAZIONE
@@ -386,6 +330,35 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["voice_text"] = testo_norm
 
     await log_food(update, context)
+
+# -----------------------------
+# LOGICA PRINCIPALE
+# -----------------------------
+
+async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if user_id != ALLOWED_USER_ID:
+        await update.message.reply_text("Non sei autorizzato a usare questo bot.")
+        return
+
+    testo = context.user_data.get("voice_text") or update.message.text
+    testo = testo.strip().lower()
+
+    intent = ai_parse_intent(testo)
+    azione = intent.get("intento")
+
+    if azione == "aggiungi":
+        await aggiungi_ai(update, testo, intent)
+    elif azione == "riepilogo_giorno":
+        await riepilogo_giorno(update, testo, intent)
+    elif azione == "riepilogo_pasto":
+        await riepilogo_pasto(update, testo, intent)
+    elif azione == "cancella":
+        await cancella_ai(update, testo, intent)
+    else:
+        await update.message.reply_text("Non ho capito cosa vuoi fare.")
+
+    context.user_data["voice_text"] = None
 
 # -----------------------------
 # AVVIO BOT
