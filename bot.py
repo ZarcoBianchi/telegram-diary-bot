@@ -100,10 +100,10 @@ def date_to_iso(d: date) -> str:
 
 def ai_parse_intent(testo: str) -> dict:
     prompt = f"""
-Sei un parser di comandi per un diario alimentare.
+Sei un parser rigoroso per un diario alimentare.
+Devi analizzare il messaggio dell'utente e restituire SOLO un JSON valido.
 
-Il tuo compito è analizzare il messaggio dell'utente e restituire SOLO un JSON valido (senza testo prima o dopo), con questa struttura:
-
+### FORMATO OBBLIGATORIO
 {{
   "intento": "aggiungi | chiedi_calorie | riepilogo_giorno | riepilogo_pasto | somma_giorno | somma_pasto | cancella | altro",
   "pasto": "colazione | pranzo | cena | null",
@@ -116,31 +116,39 @@ Il tuo compito è analizzare il messaggio dell'utente e restituire SOLO un JSON 
   ]
 }}
 
-### REGOLE DI PARSING (IMPORTANTISSIME)
+### REGOLE IMPORTANTI
 
-1. NON dividere mai un alimento composto:
-   - "crepes con la nutella"
-   - "pane e marmellata"
-   - "pasta al pesto"
-   - "riso con pollo e verdure"
-   - "yogurt con cereali"
+1. Se il messaggio contiene parole come:
+   - "oggi", "di oggi", "oggi?" → data = "oggi"
+   - "ieri", "di ieri" → data = "ieri"
 
-2. Dividi gli alimenti solo quando sono chiaramente separati:
-   - "3 crepes con la nutella e un cappuccino" → 2 alimenti
-   - "pasta al pesto, insalata e una mela" → 3 alimenti
+2. Se il messaggio contiene:
+   - "colazione" → pasto = "colazione"
+   - "pranzo" → pasto = "pranzo"
+   - "cena" → pasto = "cena"
 
-3. NON dividere ingredienti interni:
-   - "crepes con la nutella" NON diventa ["crepes", "nutella"]
+3. Se il messaggio contiene:
+   - "riepilogo", "recap", "resoconto", "mostrami" → intento = riepilogo_giorno o riepilogo_pasto
+     *Se NON è specificato un pasto → riepilogo_giorno*
+     *Se è specificato un pasto → riepilogo_pasto*
 
-4. Quantità:
-   - Se c'è un numero prima dell'alimento, mettilo in "quantita".
-   - Se non c'è quantità, lascia "quantita": null.
+4. Se il messaggio contiene:
+   - "totale", "quante calorie oggi", "somma" → intento = somma_giorno o somma_pasto
 
-5. Se non ci sono alimenti (domande, riepiloghi), "alimenti": [].
+5. Se il messaggio contiene:
+   - "aggiungi", "metti", "registra", "ho mangiato" → intento = aggiungi
 
-Messaggio utente:
+6. Se il messaggio contiene:
+   - "cancella", "rimuovi", "elimina" → intento = cancella
+
+7. Se il messaggio NON contiene alimenti → "alimenti": []
+
+8. NON inventare alimenti. NON dividere alimenti composti.
+
+### MESSAGGIO UTENTE
 "{testo}"
 
+### RISPOSTA
 Rispondi SOLO con il JSON.
 """
 
