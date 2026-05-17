@@ -95,7 +95,6 @@ Devi analizzare il messaggio dell'utente e restituire SOLO un JSON valido.
 6. Se contiene:
    - "togli", "rimuovi", "elimina", "cancella"
      → intento = cancella
-     → alimento = parola dopo il comando
 
 7. NON inventare alimenti.
 
@@ -149,7 +148,7 @@ def riconosci_data_da_intent(intent_data, testo):
         return ieri
 
     return oggi
-    
+
 # -----------------------------
 # CALORIE (AI)
 # -----------------------------
@@ -316,9 +315,9 @@ async def cancella_ai(update: Update, testo: str, intent: dict):
         f"Ho trovato più elementi che contengono '{intent_alimento}'. Quale vuoi cancellare?",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
-    
+
 # -----------------------------
-# LOGICA PRINCIPALE (TESTO + VOCALI)
+# LOGICA PRINCIPALE
 # -----------------------------
 
 async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -347,7 +346,7 @@ async def log_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["voice_text"] = None
 
 # -----------------------------
-# CALLBACK PER CANCELLAZIONE
+# CALLBACK CANCELLAZIONE
 # -----------------------------
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
