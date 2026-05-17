@@ -426,32 +426,32 @@ async def cancella_ai(update: Update, testo: str, intent: dict):
         candidati = [r for r in candidati if a in r["descrizione"].lower()]
 
     # Se l'utente ha specificato un alimento, filtriamo
-if intent_alimento:
+    if intent_alimento:
     a = intent_alimento.lower()
     candidati = [r for r in candidati if a in r["descrizione"].lower()]
 
-# Se dopo il filtro non c'è nulla → non trovato
-if not candidati:
+    # Se dopo il filtro non c'è nulla → non trovato
+    if not candidati:
     await update.message.reply_text(f"Non ho trovato '{intent_alimento}' da cancellare.")
     return
 
-# Se c'è un solo match → cancellalo subito
-if len(candidati) == 1:
+    # Se c'è un solo match → cancellalo subito
+    if len(candidati) == 1:
     r = candidati[0]
     supabase.table("pasti").delete().eq("id", r["id"]).execute()
     await update.message.reply_text(f"Ho cancellato: {r['descrizione']} ({r['kcal']} kcal)")
     return
 
-# Se ci sono più match → chiedi quale
-keyboard = []
-for r in candidati:
+    # Se ci sono più match → chiedi quale
+    keyboard = []
+    for r in candidati:
     label = f"{r['descrizione']} - {r['ora'][11:16]}"
     keyboard.append([InlineKeyboardButton(label, callback_data=f"del_{r['id']}")])
 
-await update.message.reply_text(
+    await update.message.reply_text(
     f"Ho trovato più elementi che contengono '{intent_alimento}'. Quale vuoi cancellare?",
     reply_markup=InlineKeyboardMarkup(keyboard),
-)
+    )
 
     keyboard = []
     for r in candidati:
