@@ -528,9 +528,12 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Mostra cosa hai detto (debug)
     await update.message.reply_text(f"🎤 Hai detto:\n{testo}")
 
-    # Passa il testo alla logica principale (in minuscolo!)
+    # Normalizza il testo per il parser AI
+    testo_norm = testo.lower().strip().replace(".", "")
+
+    # Passa il testo alla logica principale
     fake_update = update
-    fake_update.message.text = testo.lower()
+    fake_update.message.text = testo_norm
     await log_food(fake_update, context)
 
 
